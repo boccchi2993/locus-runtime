@@ -41,7 +41,7 @@ async function runtimeHostE2e() {
   ], { cwd: ROOT, port, label: 'runtime-host Vite preview', env: process.env });
   const appRoot = `http://127.0.0.1:${port}/`;
   try {
-    await waitForHttp(appRoot, { process: preview, timeoutMs: 15000 });
+    await waitForHttp(`${appRoot}tests/runtime-host.html`, { process: preview, timeoutMs: 15000 });
     const env = { ...process.env, E2E_HOST_URL: `${appRoot}tests/runtime-host.html` };
     const r = spawnSync(process.execPath, [path.join(__dirname, 'e2e-runtime-host.cjs')], {
       stdio: 'inherit', env,
