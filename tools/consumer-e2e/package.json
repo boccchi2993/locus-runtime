@@ -1,0 +1,16 @@
+{
+  "name": "locus-runtime-consumer",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "test:browser": "node consumer-gate.cjs"
+  },
+  "dependencies": {
+    "locus-runtime": "./locus-runtime.tgz"
+  },
+  "devDependencies": {
+    "vite": "^6.0.7"
+  }
+}

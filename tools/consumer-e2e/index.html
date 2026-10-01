@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>locus-runtime consumer gate</title>
+</head>
+<body>
+<!--
+  MINIMAL OUT-OF-REPO CONSUMER (M3a exit gate).
+
+  This page lives in its own directory outside the locus-runtime checkout.
+  It imports ONLY the package's public exports ('locus-runtime' and
+  'locus-runtime/worker-assets') — no source paths, no sibling checkouts,
+  no symlinks. Its own build tool is vite (devDependency of THIS project).
+-->
+<script type="module">
+import {
+  createRuntime,
+  createWorkspace,
+  createMemoryWorkspace,
+  shellCommandNames,
+} from 'locus-runtime';
+import { PY_WORKER_SOURCE, GREP_WORKER_SOURCE } from 'locus-runtime/worker-assets';
+
+const errors = [];
+window.addEventListener('error', (e) => errors.push(String(e.message || e)));
+window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejection: ' + String(e.reason && e.reason.message || e.reason)));
+
+(async () => {
+  const host = await createRuntime({
+    workerAssets: { pyWorkerSource: PY_WORKER_SOURCE, grepWorkerSource: GREP_WORKER_SOURCE },
+  });
+  const session = host.createSession();
+
+  const statusEvents = [];
+  session.onStatus((snap) => statusEvents.push(snap.interpreter));
+
+  function makeVfs() {
+    const vfs = createWorkspace();
+    vfs.mount('/mnt/workspace', createMemoryWorkspace({ name: 'workspace' }), 'read-write');
+    return vfs;
+  }
+  const vfs = makeVfs();
+
+  // A parking VFS for the boundary gate: a dedicated session whose write
+  // stalls on a gated path (the driver decides when the write commits).
+  function makeParkingVfs() {
+    const inner = makeVfs();
+    const s = host.createSession();
+    const p = { session: s, vfs: inner, log: [], gate: Promise.resolve(), open: () => {}, parkPath: null };
+    p.hold = (path) => {
+      p.parkPath = path;
+      p.gate = new Promise((r) => { p.open = r; });
+    };
+    const innerWrite = inner.write.bind(inner);
+    inner.write = async (path, text) => {
+      p.log.push('write:enter:' + path);
+      if (path === p.parkPath) {
+        p.log.push('write:park:' + path);
+        await p.gate;
+        p.log.push('write:resume:' + path);
+      }
+      const out = await innerWrite(path, text);
+      p.log.push('write:commit:' + path);
+      return out;
+    };
+    return p;
+  }
+
+  // Generic host policy fixture (the injection seam any host product uses).
+  const GUARD = '/home/locus/keep';
+  const policy = {
+    checkMove(a) {
+      return (a.source.indexOf(GUARD) === 0 || a.destination.indexOf(GUARD) === 0)
+        ? { allowed: false, reason: 'kept tree is immutable' }
+        : { allowed: true };
+    },
+    checkRemove(a) {
+      return a.target.indexOf(GUARD) === 0
+        ? { allowed: false, reason: 'kept tree is immutable' }
+        : { allowed: true };
+    },
+    isPolicyRefusal(e) { return !!e && e.code === 'kept_refusal'; },
+  };
+
+  // Scripted execution-authorization port (deny recordings, no dispatch).
+  const authState = { asks: 0, outcome: 'allow', scope: 'once' };
+  const authorization = {
+    request: async () => {
+      authState.asks++;
+      return { outcome: authState.outcome, scope: authState.scope };
+    },
+  };
+
+  async function exec(input, context) {
+    const res = await session.execute({
+      kind: 'shell',
+      input,
+      context: Object.assign({ filesystem: vfs }, context || {}),
+    });
+    return { output: res.output, ok: res.ok, isError: !!res.isError, boundary: res.boundary, backend: res.backend, operation: res.operation };
+  }
+
+  async function runPython(code) {
+    const res = await session.execute({ kind: 'python', input: code, context: { filesystem: vfs } });
+    return { ok: res.ok, output: res.stdout, stderr: res.stderr };
+  }
+
+  window.__consumer = {
+    host, session, vfs, makeVfs, makeParkingVfs, policy, authorization, authState,
+    exec, runPython, errors, statusEvents,
+    capabilities: () => host.capabilities(),
+    describeCommands: () => session.describeCommands(),
+    commands: shellCommandNames(),
+    // import-time purity probes for the CONSUMER bundle graph
+    purity: { registry: !!window.__LOCUS_RUNTIME_CORE__ },
+    ready: true,
+  };
+  document.title = 'consumer-ready';
+})().catch((e) => {
+  window.__consumerBootError = String(e && e.message || e);
+  document.title = 'consumer-boot-failed';
+});
+</script>
+</body>
+</html>

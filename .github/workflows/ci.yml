@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'refactor/**']
+  pull_request:
+
+jobs:
+  unit:
+    name: unit tests (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: import purity
+        run: node tools/verify-import-purity.mjs
+
+  build:
+    name: build + package checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: boundary gate over sources + built bundle
+        run: node tests/runtime-boundary.test.cjs
+      - name: pack + content check
+        run: |
+          npm pack
+          CONTENT=$(tar -tzf locus-runtime-*.tgz)
+          echo "$CONTENT"
+          echo "$CONTENT" | grep -q 'package/src/index.js'
+          echo "$CONTENT" | grep -q 'package/src/worker-assets.js'
+          echo "$CONTENT" | grep -q 'package/LICENSE'
+          # nothing outside src/ + LICENSE + README + package.json
+          if echo "$CONTENT" | grep -qv -E '^package/(src/|LICENSE|README\.md|package\.json)'; then
+            echo 'unexpected file in the package'; exit 1
+          fi
+
+  consumer:
+    name: out-of-repo tarball consumer (headless Chrome)
+    runs-on: ubuntu-latest
+    needs: [unit, build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm pack
+      - name: assemble the consumer from the tarball alone
+        run: |
+          mkdir -p consumer-e2e
+          cp locus-runtime-*.tgz consumer-e2e/locus-runtime.tgz
+          cp tools/consumer-e2e/package.json consumer-e2e/
+          cp tools/consumer-e2e/index.html consumer-e2e/
+          cp tools/consumer-e2e/consumer-gate.cjs consumer-e2e/
+          cp tests/helpers/chrome.cjs consumer-e2e/chrome-driver.cjs
+      - name: install (tarball + the consumer's own build tool only)
+        working-directory: consumer-e2e
+        run: npm install
+      - name: run the consumer browser gate
+        working-directory: consumer-e2e
+        run: |
+          CHROME=$(which google-chrome || which chromium || true)
+          export CHROME
+          node consumer-gate.cjs
+
+  browser:
+    name: browser gates (headless Chrome)
+    runs-on: ubuntu-latest
+    needs: [unit, build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: |
+          CHROME=$(which google-chrome || which chromium || true)
+          export CHROME
+          npm run test:e2e
