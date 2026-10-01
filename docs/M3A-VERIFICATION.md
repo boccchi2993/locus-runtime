@@ -38,6 +38,7 @@ not touched).
 | Browser: active content | `verify-active-content.cjs` (relay fixture) | **3/3** — control exfiltrates, real handler neutralizes |
 | Out-of-repo consumer | `consumer-gate.cjs` in `../Locus-runtime-consumer-m3a` (a directory OUTSIDE this checkout; installs ONLY the packed tarball + its own vite; imports ONLY `locus-runtime` and `locus-runtime/worker-assets`; no source path, no symlink) | **16/16** — C0 bundle has zero `file:`/absolute/sibling-source references; C1 VFS shell write/read; C2 REAL Python (real pinned CDN boot) + write-back; C3 status events cold→ready; C4a pre-aborted refusal, C4b reset boundary over a parked write (dispatched write commits, boundary reported, session reusable), C4d dispose terminal; C5 injected generic mutation policy refuses with composed reason + read-only authority never granted; C6 authorization deny → `network_denied`, one ask, zero dispatch; C7 capabilities/describeCommands/purity; C8 zero page errors |
 | Clean checkout | `git clone --branch refactor/extract-runtime` of the PUSHED branch → `npm ci && npm run build && npm test` | clone @ `0129c55`; all green (see §2 for the one first-run ordering finding) |
+| CI (GitHub Actions, ubuntu-latest) | first PR-branch runs of `.github/workflows/ci.yml` | **GREEN — run 36883712482** (`unit` + `build` incl. pack content check + boundary + `consumer` out-of-repo tarball gate + `browser` gates, all four jobs success; all 8 browser suites PASS on the runner, incl. python-authority and the consumer). Two first-run findings fixed before the green run, see §2 (7) |
 
 ## 2. First failures during this round — preserved, then fixed (never assertion-loosened)
 
@@ -65,10 +66,20 @@ not touched).
 5. **Consumer gate first run: one FAIL** — a dead check line in the DRIVER
    itself (a Promise in a boolean context); the real C7 check passed. Driver
    fixed; gate then 16/16.
+6. **CI run 1: unit job FAIL** — the same G5 build-ordering fact as (1);
+   the workflow now builds before the unit gate (local documented order
+   unchanged).
+7. **CI run 2: browser job FAIL (runtime-host suite only)** — the
+   orchestrator's readiness probe requested `/`, which this dist does not
+   serve (there is no root index.html; the host page lives at
+   `/tests/runtime-host.html`), so the probe 404-looped into its timeout
+   while the server was up. The probe now requests the actual page URL
+   (found on CI; 7/8 suites had already passed in that run). Run 3 green.
 
-All original failing outputs were captured in-session and are characterized
-above; none led to a weakened assertion — every fix is in migrated test
-driver code or in the loading model.
+All original failing outputs were captured (CI logs are retained on the
+runs; the local ones were captured in-session) and none led to a weakened
+assertion — every fix is in migrated test driver code, the loading model,
+or CI plumbing.
 
 ## 3. F3 — python-authority E3 (`SystemError: error return without exception set`)
 
@@ -119,11 +130,10 @@ named follow-up experiment remains open for the Runtime repository now.
 
 ## 5. Unverified scope / honest boundary
 
-- **CI workflow is designed and committed but its first GitHub-Actions run
-  happens on the extraction PR.** All recorded evidence above is
-  Windows-local. The workflow's browser jobs require Chrome on the runner
-  (ubuntu-latest provides it); the consumer job re-assembles the harness
-  from `tools/consumer-e2e/` and installs ONLY the tarball.
+- **CI reproducibility is now PROVEN, not just designed**: run 36883712482
+  (ubuntu-latest, Node 24, runner Chrome) passes all four jobs. The
+  Windows-local runs in §1 remain the primary recorded evidence; CI is the
+  reproducibility proof.
 - The consumer gate ran in a sibling directory of this checkout (not a
   remote machine); its isolation property is enforced by construction —
   it installs the tarball, imports only the public exports, and C0 asserts
