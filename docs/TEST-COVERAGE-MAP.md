@@ -89,3 +89,64 @@ iteration, so a suite's line count can legitimately exceed its source-side
   suite's name set is a subset match (PA14b documented vacuous).
 - e2e-network: 60 PASS lines = 58 page checks + 2 server-side (N16c/d);
   N21d replaced in place (same slot, Runtime-true property).
+
+## 5. M3a review round 1 — new coverage (no existing check weakened)
+
+The review found three gaps, all on the EXTERNAL-CONSUMER side. The Runtime
+implementation modules were NOT changed in this round (verified: zero diff
+under `src/` except the NEW re-export file `src/workspace-api.js`); every fix
+below is new tests, gate wiring, or docs. Names:
+
+- **F1 (public provider subpath)** — `tests/runtime-import-purity.test.mjs`
+  gains SA5–SA5d (subpath surface, single-implementation identity against
+  `src/workspace.js`/`src/vfs.js`, import purity, escape-rule behavior);
+  `tools/verify-import-purity.mjs` (the CI purity step) checks the same;
+  `tests/runtime-boundary.test.cjs` gains G6e (the subpath declares no
+  implementation), walks the subpath in G7's closure (G6d now covers both
+  entries), and G1/G6b/G6c's scans cover the new file via the widened
+  HOST_FILES/RUNTIME_FILES set. Consumer gate additions: C9a (subpath import + full surface —
+  the check that FAILED on the unmodified baseline package),
+  C9b (import purity inside the consumer bundle), C9c–iv
+  (LocalDirectoryWorkspace over a CONTROLLED directory handle: write/read/
+  list, shared escape rules, inner-`..` resolution, permission outcomes,
+  honest NotAllowedError), C9d–ii (OPFSWorkspace over a TEMPORARY test-owned
+  OPFS directory: session shell writes, a FRESH provider instance reads the
+  bytes back, cleanup verified), C9e–ii (a minimal host-custom provider from
+  the public surface only). Evidence of the baseline failure is in
+  M3A-VERIFICATION §7.
+- **F2 (mid-flight lifecycle gates in the consumer)** — the parking VFS
+  gained explicit `entered`/`release` barriers and a transition log (no fixed
+  sleeps anywhere; every wait carries a labeled timeout and the scenarios
+  clean up in `finally`). New/reworked checks: C4b-i…iii (reset boundary with
+  pre-release unsettled/busy assertions), C4e-i…iv (mid-flight CALLER abort:
+  unsettled across the abort, dispatched write commits, second write never
+  dispatches, cancellation-shaped honest failure, `boundary` absent, session
+  reusable), C4f-i…iv (mid-flight dispose: busy stays TRUE until true
+  settlement, terminal refusal for execute AND prepare with the first
+  reason, idempotent dispose), C4g + C4g-control (the LAST side effect parks
+  and a caller abort lands in the dispatched-but-unsettled window: the run
+  FAILS even though the underlying write commits; the CONTROL pins that the
+  park itself downgrades nothing). The former C4d (dispose refuses settled
+  work) is superseded by the stronger C4f (same terminal-refusal semantics,
+  proven over an UNSETTLED run as well).
+- **F3 (zero-dispatch oracle for network denial)** — the old C6 asserted only
+  the failure text + one ask. It is replaced by C6a/C6b/C6c: a narrow page
+  fetch recorder on the fixed synthetic target
+  (`https://consumer-gate-counted.test`, deterministic responses, never
+  really fetched; all other requests — including the Pyodide CDN — delegate
+  to the real fetch untouched) for the browser-direct path, and a relay-stub
+  counter on the consumer's own test server for the documented relay path
+  (cross-origin side-effecting requests travel as the same-origin
+  `POST /fetch` envelope — the runtime's unchanged backend decision; the
+  stub counts envelopes addressed to the test target and forwards nothing).
+  C6a (GET allow control: the recorder sees EXACTLY ONE real dispatch),
+  C6b (POST allow control: the relay stub sees exactly one forwarded
+  envelope), C6c (deny: BOTH counters move by ZERO + the historic
+  denial-text and single-ask assertions). C0b (new) asserts and prints the
+  resolved package location inside the consumer directory.
+
+Distinct names for distinct subjects: the historical
+**"python-authority E3 SystemError"** question (§3, root cause still
+unconfirmed) and this round's **network dispatch-counting task (F3 of review
+round 1)** are UNRELATED. A green dispatch-counting run says nothing about
+the historical exception and does not close it.

@@ -29,7 +29,11 @@ or rewritten from the product repository: the new commits here are the
 extraction work, authored as such. The per-file source mapping — source path,
 source blob, destination path, transformation, and what was deliberately NOT
 migrated — is recorded in [EXTRACTION-PLAN.md](EXTRACTION-PLAN.md) (per-file
-table) and [M3A-VERIFICATION.md](M3A-VERIFICATION.md) (gate evidence).
+table; the source-blob column carries the REAL `git rev-parse
+<baseline>:<path>` values under the pinned commit, so every row is
+independently verifiable — target-file hashes are never substituted — and
+files created in this repository say so explicitly) and
+[M3A-VERIFICATION.md](M3A-VERIFICATION.md) (gate evidence).
 
 ## License
 

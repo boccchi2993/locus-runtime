@@ -33,6 +33,15 @@ import {
   createMemoryWorkspace,    // → byte-exact in-memory provider
   shellCommandNames,
 } from 'locus-runtime';
+// The filesystem PROVIDER surface (mount your own storage):
+import {
+  WorkspaceAdapter,
+  LocalDirectoryWorkspace,
+  OPFSWorkspace,
+  normalizeWorkspacePath,
+  ensureWorkspacePermission,
+  vfsError,
+} from 'locus-runtime/workspace';
 import { PY_WORKER_SOURCE, GREP_WORKER_SOURCE } from 'locus-runtime/worker-assets';
 ```
 
@@ -119,6 +128,66 @@ Execution authorization (required for side-effecting network methods):
 side-effecting requests are dispatched EXACTLY ONCE (an ambiguous failure is
 never retried across backends); GET/HEAD may fall back browser → relay once.
 
+## Workspace providers (`locus-runtime/workspace`)
+
+The root entry exposes the execution contract and the VFS factories; the
+`./workspace` subpath exposes the provider LAYER beneath them — what a host
+mounts its own storage through. Ownership split: the runtime provides the
+generic providers and filesystem mechanisms; the HOST picks directories,
+obtains OPFS handles, decides mount points and authorities, and owns
+persistence, schema and product policy. Importing the subpath is pure: it
+requests no permission, touches no OPFS/DOM, starts no worker.
+
+- `WorkspaceAdapter` — the provider base class: `list/read/readBytes/write/
+  remove/mkdir/exists/stat` (all async). Extend it to bring any backend; a
+  missing method throws `not implemented`.
+- `LocalDirectoryWorkspace(dirHandle)` — provider over a File System Access
+  API directory handle (from `showDirectoryPicker()` or IndexedDB-restored
+  handles). Read/write bytes and strings, recursive mkdir, sorted `list`.
+- `OPFSWorkspace(dirHandle, { name? })` — provider over an Origin-Private
+  File System directory (e.g. from
+  `navigator.storage.getDirectory()`). Same surface; `name` labels the mount.
+- `normalizeWorkspacePath(path) → string` — the ONE path algorithm every
+  provider shares. Backslashes normalize to `/`, leading `/` and `.` segments
+  are dropped, inner `..` resolves; `..` past the root throws
+  `path escapes workspace: <path>`, drive letters/control characters throw
+  `invalid path`, `:` segments throw `invalid path segment`. Call it in your
+  own provider to inherit the same escape rules.
+- `ensureWorkspacePermission(handle) → Promise<boolean>` — query-then-request
+  `readwrite`. Resolves `true` when granted, `false` when the user denies
+  (a denial is a return value, never a throw); `true` immediately for handles
+  without the permission API.
+- `vfsError(name, message) → Error` — the runtime's name-tagged error
+  factory. Throw these from your own provider so the VFS/shell keep
+  classifying faults: `NotFoundError` makes `exists()` return `false`;
+  `ReadOnlyError`/`TypeMismatchError` surface as-is.
+
+Mounting a handle the host obtained (the runtime never opens a picker and
+never requests permission on your behalf):
+
+```js
+import { OPFSWorkspace, LocalDirectoryWorkspace, ensureWorkspacePermission } from 'locus-runtime/workspace';
+
+// durable OPFS mount — the host owns the handle and the mount decision:
+const root = await navigator.storage.getDirectory();
+let homeDir = root;
+for (const seg of ['home', 'locus']) {
+  homeDir = await homeDir.getDirectoryHandle(seg, { create: true });
+}
+const vfs = createWorkspace();
+vfs.mount('/home/locus', new OPFSWorkspace(homeDir, { name: 'home' }), 'read-write');
+
+// user-picked folder — the host asks, then mounts:
+const handle = await window.showDirectoryPicker();
+if (await ensureWorkspacePermission(handle)) {
+  vfs.mount('/mnt/workspace', new LocalDirectoryWorkspace(handle), 'external-read-write');
+}
+```
+
+A host-custom provider extends the same base (see the consumer gate's
+`f1CustomProvider` scenario in `tools/consumer-e2e/index.html` for a complete
+worked example).
+
 Importing the package is pure: no worker starts, no Python downloads, no DOM
 is queried, no storage is opened, no global is defined. Python stays cold
 until the first `kind: 'python'` execution (a text-only task downloads
@@ -148,10 +217,15 @@ nothing).
 
 ```bash
 npm ci
-npm test          # 23 Node unit suites (no internet, no browser)
 npm run build     # bundles the standalone host page (dist/tests/runtime-host.html)
+npm test          # 23 Node unit suites (no internet, no browser)
 npm run test:e2e  # 8 browser gates (real Chrome; real pinned Python CDN downloads)
 ```
+
+The order matters: the boundary suite's G5 section scans the BUILT bundle in
+`dist/`, so `npm test` requires `npm run build` first — on a fresh clone
+without `dist/` the boundary gate fails closed (there is deliberately no
+"skip when dist is absent" fallback).
 
 Browser gates need headless Chrome (auto-located, or `CHROME=/path/to/chrome`).
 The Python gates download the REAL pinned Pyodide set from the jsDelivr CDN
@@ -159,10 +233,11 @@ The Python gates download the REAL pinned Pyodide set from the jsDelivr CDN
 plugin-runtime suites, which serve synthetic verified bytes locally.
 No model, model key or paid API is ever contacted.
 
-Layout: `src/index.js` (public entry) · `src/{workspace,vfs,network,shell}.js`
-(implementation modules) · `src/worker-assets.js` (shipped worker sources) ·
-`docs/` (extraction design, provenance, coverage map, verification) ·
-`tests/` (unit suites + browser gates + the standalone host page).
+Layout: `src/index.js` (public entry) · `src/workspace-api.js` (provider
+subpath entry) · `src/{workspace,vfs,network,shell}.js` (implementation
+modules) · `src/worker-assets.js` (shipped worker sources) · `docs/`
+(extraction design, provenance, coverage map, verification) · `tests/`
+(unit suites + browser gates + the standalone host page).
 
 ## License
 

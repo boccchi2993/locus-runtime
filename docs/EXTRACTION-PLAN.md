@@ -21,29 +21,76 @@ Package exports (deliberately minimal — only interfaces with consumers):
 | Export | Module | Content |
 |---|---|---|
 | `.` | `src/index.js` | the public API above |
+| `./workspace` | `src/workspace-api.js` | the FILESYSTEM PROVIDER surface (M3a review round F1): `WorkspaceAdapter`, `LocalDirectoryWorkspace`, `OPFSWorkspace`, `normalizeWorkspacePath`, `ensureWorkspacePermission`, `vfsError` — see §1b |
 | `./worker-assets` | `src/worker-assets.js` | `PY_WORKER_SOURCE`, `GREP_WORKER_SOURCE` (version-controlled worker assets) |
 
-Everything else (`src/workspace.js`, `src/vfs.js`, `src/network.js`,
-`src/shell.js`, `src/lib/utf8.js`) is package-internal. The npm `files` field
+Everything else (`src/vfs.js`, `src/network.js`, `src/shell.js`, and the
+provider implementation `src/workspace.js`) is package-internal — `./workspace`
+is a one-way RE-EXPORT of the same symbols, never a second implementation
+(enforced by boundary gate G6e). The npm `files` field
 ships `src/`, LICENSE, README; the package is marked `private` and is NOT
 published to any registry.
 
+### 1b. Public workspace provider surface (review round F1 — call audit)
+
+The review reproduced the gap: a tarball consumer could not build a page
+importing `locus-runtime/workspace` (`Missing "./workspace" specifier` /
+`ERR_PACKAGE_PATH_NOT_EXPORTED`), while the source Product completes four
+assemblies through the provider layer that M3c must keep able to work after
+the in-repo Runtime copy is deleted. The audit below is the recorded basis
+for exactly what is published (nothing more):
+
+| Symbol | Source-Product callers @ 2aec76e | Ownership | Decision |
+|---|---|---|---|
+| `LocalDirectoryWorkspace` | `src/ui/store.js` `mountExternalHandle` (line 1563): `new LocalDirectoryWorkspace(handle)` for a user-picked folder mounted at `/mnt/workspace` | Runtime (generic provider) | **published** |
+| `OPFSWorkspace` | `src/ui/store.js` `mountDurableStorage` (lines 1587, 1593): `new OPFSWorkspace(dir, {name})` for the durable home (`/home/locus`, read-write) and durable plugin storage (`/mnt/plugins`, system-read-only); directories come from the Product `PersistenceService` | Runtime (generic provider); the HOST obtains the OPFS handles and decides mounts | **published** |
+| `WorkspaceAdapter` | `src/extensions.js` (`StaticFileWorkspace`, `SkillInstanceWorkspace` — `extends`), `src/conversation-history-workspace.js` (`ConversationHistoryWorkspace` — `extends`), `src/capability-package.js` (runtime `instanceof` check, lines 123–124) | Runtime (abstract base); Product defines concrete views | **published** |
+| `normalizeWorkspacePath` | `src/extensions.js` ×5, `src/conversation-history-workspace.js` ×1, `src/capability-package.js` ×1 (project-root validation) | Runtime (the ONE path algorithm) | **published** |
+| `ensureWorkspacePermission` | `src/ui/store.js` `reconnectWorkspace` (1629) and `mountFolder` (1663) — readwrite request for a picked handle before mounting | Runtime (generic FS-API helper); the HOST decides WHEN to ask | **published** |
+| `vfsError` | `src/extensions.js` ×5 (`TypeMismatchError`, `NotMountedError`, `ResourceBusyError`, `ReadOnlyError`) — host providers must throw runtime-classifiable errors | Runtime (error factory) | **published** (audit addition beyond the five review-named symbols) |
+| `isNotFoundOrTypeMismatch` | `src/workspace.js` internal only | Runtime internal | **not published** |
+| `VirtualWorkspace` (constructor) | `src/ui/store.js` line 81: `new VirtualWorkspace({ listCommands: () => Object.keys(SHELL_COMMANDS), homeSkeleton })` | Runtime | **not published as a class** — the existing root factory covers it equivalently: `createWorkspace({ homeSkeleton })` builds the same VFS (`createWorkspace`'s default `listCommands` IS `() => shellCommandNames()`, the same registry keys). Proven equivalent, not assumed. |
+| `createWorkspace` / `createMemoryWorkspace` / `shellCommandNames` | root entry consumers | Runtime | already published (unchanged) |
+
+Ownership boundary preserved: the runtime provides the generic providers and
+filesystem mechanisms; the Product keeps choosing directories, obtaining OPFS
+handles, deciding mount points/authorities, and owning persistence, schema and
+product policy (no `persistence.js`, IDB or session-history code moved).
+Importing `locus-runtime/workspace` is PURE — it requests no permission,
+touches no OPFS/DOM/storage, starts no worker and downloads no Python
+(gated: SA5, boundary G6d/G6e/G7, consumer C9b).
+
 ## 2. Source → target file map
 
-| Source path @ 2aec76e | Target path | Processing |
-|---|---|---|
-| `src/runtime/index.js` | `src/index.js` | Rewritten assembly: the two-mode core resolution (registry delegation / dynamic-import self-assembly) DELETED; implementation modules imported directly. Session semantics byte-equivalent (tracked in §4). |
-| `src/runtime/worker-assets.js` | `src/worker-assets.js` | Verbatim (already ESM). |
-| `src/runtime/core.js` | — | DELETED (existed only to import classic sources as ES modules). |
-| `src/telemetry.js` | `src/lib/utf8.js` | SPLIT: only `utf8ByteLength` (the one function the Runtime consumes) moved. The `Telemetry` singleton, record store, `window.__telemetry` accessor and the `renderDebugPanel` history are PRODUCT observability — not extracted. |
-| `src/workspace.js` | `src/workspace.js` | ESM conversion: `export { … }` block added, `globalThis` publishes removed. `ConversationHistoryWorkspace` had already moved to Product (M2a). |
-| `src/vfs.js` | `src/vfs.js` | ESM conversion: `import { WorkspaceAdapter, normalizeWorkspacePath } from './workspace.js'`; exports added; publishes removed. |
-| `src/network.js` | `src/network.js` | ESM conversion: exports added (`NetworkRuntime`, `safeNetworkUrlForDisplay`, `isPrivateHostname`, bound constants); publishes removed. |
-| `src/shell.js` | `src/shell.js` | ESM conversion: three imports (utf8/vfs/network) replace classic globals; the declared `__LOCUS_RUNTIME_CORE__` registry block DELETED and replaced by the module export block. ONE additive test seam (§5). |
-| `functions/fetch.js` | `tests/fixtures/relay/fetch.js` | Copied as a TEST-ONLY fixture: the reference `/fetch` relay the network browser gate drives. Not part of the package; removal note in §6. |
-| `tests/fixtures/pyodide-lock-snapshot.json` | same path | Verbatim (test fixture; Pyodide-derived data, see PROVENANCE). |
-| `tests/fixtures/capability-package/…whl` | same path | Verbatim (synthetic wheel fixture for the plugin suites). |
-| `LICENSE` | `LICENSE` | Verbatim (Apache-2.0 as found, template placeholder preserved). |
+The second column is the SOURCE blob SHA under the pinned baseline
+(`git rev-parse 2aec76e78431382873be1db8a6db6310cc89c782:<path>`; 12 hex
+chars shown — verify with the full command). Target-side hashes are never
+substituted for source blobs.
+
+| Source path @ 2aec76e | Source blob | Target path | Processing |
+|---|---|---|---|
+| `src/runtime/index.js` | `00e392d5e735…` | `src/index.js` | Rewritten assembly: the two-mode core resolution (registry delegation / dynamic-import self-assembly) DELETED; implementation modules imported directly. Session semantics byte-equivalent (tracked in §4). |
+| `src/runtime/worker-assets.js` | `be829928df91…` | `src/worker-assets.js` | Verbatim (already ESM). |
+| `src/runtime/core.js` | `dbb05af324b1…` | — | DELETED (existed only to import classic sources as ES modules). |
+| `src/telemetry.js` | `ff9b5c27cc50…` | `src/lib/utf8.js` | SPLIT: only `utf8ByteLength` (the one function the Runtime consumes) moved — the target file carries THAT symbol from this source blob; the `Telemetry` singleton, record store, `window.__telemetry` accessor and the `renderDebugPanel` history are PRODUCT observability — not extracted. |
+| `src/workspace.js` | `ef834d903252…` | `src/workspace.js` | ESM conversion: `export { … }` block added, `globalThis` publishes removed. `ConversationHistoryWorkspace` had already moved to Product (M2a). |
+| `src/vfs.js` | `44a2a7543e17…` | `src/vfs.js` | ESM conversion: `import { WorkspaceAdapter, normalizeWorkspacePath } from './workspace.js'`; exports added; publishes removed. |
+| `src/network.js` | `b8efb24ae815…` | `src/network.js` | ESM conversion: exports added (`NetworkRuntime`, `safeNetworkUrlForDisplay`, `isPrivateHostname`, bound constants); publishes removed. |
+| `src/shell.js` | `5cc9dec0a117…` | `src/shell.js` | ESM conversion: three imports (utf8/vfs/network) replace classic globals; the declared `__LOCUS_RUNTIME_CORE__` registry block DELETED and replaced by the module export block. ONE additive test seam (§5). |
+| `functions/fetch.js` | `c77110402406…` | `tests/fixtures/relay/fetch.js` | Copied as a TEST-ONLY fixture: the reference `/fetch` relay the network browser gate drives. Not part of the package; removal note in §6. |
+| `tests/fixtures/pyodide-lock-snapshot.json` | `5c1597ddec38…` | same path | Verbatim (test fixture; Pyodide-derived data, see PROVENANCE). |
+| `tests/fixtures/capability-package/` | tree `2a1415cb54d8…` | same path | Verbatim directory (tree SHA shown; synthetic wheel/plugin fixtures for the plugin suites). |
+| `LICENSE` | `d64569567334…` | `LICENSE` | Verbatim (Apache-2.0 as found, template placeholder preserved). |
+
+Files with NO source blob (created in this repository, in commit order):
+
+| Target path | Origin |
+|---|---|
+| `src/lib/utf8.js` | NEW file holding the split `utf8ByteLength` symbol from source `src/telemetry.js` (row above) |
+| `tests/**` (unit suites + browser gates + helpers + the runtime-host page) | NEW files: migrated/rewritten test suites — per-suite mapping in [TEST-COVERAGE-MAP.md](TEST-COVERAGE-MAP.md) |
+| `tools/consumer-e2e/*` | NEW files: the out-of-repo tarball consumer fixture/gate (M3a extraction commit `5918fe8`) |
+| `.github/workflows/ci.yml`, `README.md`, `docs/*`, `package.json` | NEW: this repository's own packaging/CI/docs |
+| `src/workspace-api.js` | NEW (review round 1, commit series of this round): the one-way re-export subpath from §1b — carries NO implementation of its own (boundary G6e) |
 
 Import-time purity (a hard requirement, gated by
 `tests/runtime-import-purity.test.mjs`): importing the package starts no

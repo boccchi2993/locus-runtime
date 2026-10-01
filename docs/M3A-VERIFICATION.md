@@ -1,14 +1,19 @@
 # M3a verification record — Runtime repository extraction
 
-Status: M3a deliverable. Extraction candidate branch `refactor/extract-runtime`
-@ `0129c55` (this record's evidence covers commits `5918fe8` + `0129c55` over
-the minimal `main` @ `5bedeeb`). Source baseline:
+Status: M3a deliverable + review round 1. Extraction candidate branch
+`refactor/extract-runtime` @ `0129c55` (§1–§6 record the extraction-round
+evidence: commits `5918fe8` + `0129c55` over the minimal `main` @ `5bedeeb`).
+§7 records REVIEW ROUND 1 (the public-provider-subpath, consumer-lifecycle
+and network-dispatch-oracle round) — its evidence covers this round's own
+commits on top. Source baseline:
 `boccchi2993/Locus-browser-agent-runtime` @ `2aec76e78431382873be1db8a6db6310cc89c782`
 (branch `refactor/repository-split-m2c`, head of OPEN PR #7, base
 `refactor/repository-split-m2b` — verified via the GitHub API at extraction
 start; no product branch rewritten, no PR merged). Companion documents:
-[EXTRACTION-PLAN.md](EXTRACTION-PLAN.md) (per-file map, deletions, API deltas),
-[TEST-COVERAGE-MAP.md](TEST-COVERAGE-MAP.md) (per-suite migration mapping),
+[EXTRACTION-PLAN.md](EXTRACTION-PLAN.md) (per-file map incl. source blobs,
+deletions, API deltas, §1b call audit),
+[TEST-COVERAGE-MAP.md](TEST-COVERAGE-MAP.md) (per-suite migration mapping +
+review-round additions §5),
 [PROVENANCE.md](PROVENANCE.md) (license/third-party/dual-implementation).
 
 Environment: Windows 10, Git Bash, Node v24.10.0, npm 11.6.1, headless
@@ -159,3 +164,152 @@ contract (VFS/shell, real Python, status events, cancel/reset/dispose,
 policy and authorization injection), and the deleted assembly dependencies
 enforced structurally. Not done by design: npm publish, deployment, PR
 merge, Harness extraction, and any product-side import switch (M3c).
+
+## 7. Review round 1 — public provider subpath, consumer lifecycle gates, network dispatch oracle
+
+Scope of the round: the review's three findings (F1 public provider
+interface, F2 external-consumer mid-flight lifecycle gates, F3 consumer
+network denial counting) plus consumer CI isolation, provenance blob
+columns and the development-order documentation fix. **The Runtime
+implementation modules were NOT changed**: the only `src/` addition is the
+NEW one-way re-export file `src/workspace-api.js` (`git diff 722fe17..HEAD --
+src/index.js src/workspace.js src/vfs.js src/network.js src/shell.js
+src/worker-assets.js` is empty). F2 was a verification gap, not a found
+regression — the implementation semantics were already pinned by the in-repo
+lifecycle suite (X-A/X-B) and now also hold through the public consumer
+surface.
+
+### 7.1 F1 — baseline failure evidence (unmodified `722fe17` tarball)
+
+The review-round consumer checks were run against the EXISTING package
+(tarball built from `722fe17`, installed into a fresh consumer directory) —
+they fail exactly at the public-interface gap, before any fix:
+
+1. `vite build` of the consumer page refuses the import:
+   `[commonjs--resolver] Missing "./workspace" specifier in "locus-runtime" package` —
+   the consumer cannot even build.
+2. Node-side minimal repro against the installed package:
+   `import('locus-runtime/workspace')` →
+   `ERR_PACKAGE_PATH_NOT_EXPORTED — Package subpath './workspace' is not defined by "exports"`.
+3. The root entry exposes exactly `createMemoryWorkspace, createRuntime,
+   createWorkspace, shellCommandNames` — no provider symbol is reachable,
+   and deep imports are blocked by the exports map.
+
+After the fix (same checks, same consumer harness, only the tarball
+re-packed): 39/39 consumer checks PASS (§7.3).
+
+### 7.2 The published surface and its audit
+
+Published via the new `locus-runtime/workspace` subpath
+(`src/workspace-api.js`, one-way re-exports only — boundary G6e enforces
+zero local implementation): `WorkspaceAdapter`, `LocalDirectoryWorkspace`,
+`OPFSWorkspace`, `normalizeWorkspacePath`, `ensureWorkspacePermission`,
+`vfsError`. The audit behind the exact set (source-Product callers,
+ownership, and why `VirtualWorkspace` stays unpublished behind the
+equivalent `createWorkspace` factory) is EXTRACTION-PLAN §1b. The
+`vfsError` addition beyond the five review-named symbols is audit-driven:
+`src/extensions.js` throws it five times and the providers must stay
+runtime-classifiable without copying the factory.
+
+### 7.3 Gates actually executed THIS round
+
+| Gate | Result |
+|---|---|
+| `npm ci` → `npm run build` → `npm test` (Windows, local) | **23/23 suites pass** (1216 pre-existing + new SA5–SA5d checks; suite count unchanged) |
+| Boundary gate `tests/runtime-boundary.test.cjs` | **22/22** (the extraction round's 20 checks + G6e "the subpath declares no implementation" + G1's scan now covering the new entry file) |
+| Import purity `tools/verify-import-purity.mjs` | OK — root + workspace subpath exports, zero global leaks |
+| `npm pack` content | `package/src/**` (incl. `workspace-api.js`), LICENSE, README, package.json — nothing else |
+| Out-of-repo consumer gate (tarball, own vite, own Chrome; assembled in a directory OUTSIDE the checkout — the new CI isolation, rehearsed locally) | **39/39 PASS** — C0/C0b, C1, C5/b, C6a/b/c (dispatch counting), C4a, C4b-i…iii, C4e-i…iv, C4f-i…iv, C4g + control, C2/b, C3, C9a…C9e-ii, C8 |
+| Browser: runtime-host (`e2e-runtime-host.cjs`, vite preview) | **22/22** — the entry-assembly surface this round's exports change could touch |
+| CI (GitHub Actions) | triggered by the push; the consumer job now assembles under `RUNNER_TEMP` (see §7.6) |
+
+Gate selection rationale: the implementation modules are byte-identical to
+the extraction baseline, so the python/worker/bootstrap/network browser
+specialists were NOT mechanically re-run locally (their coverage is
+unchanged and CI re-runs the full set on the pushed head); the runtime-host
+gate was run because it is the browser consumer of the package entry
+surface.
+
+### 7.4 First failures during this round — captured, then fixed (never assertion-loosened)
+
+1. **Consumer gate `C0b` FAIL on the baseline run (gate's own bug)** — the
+   check resolved `locus-runtime/package.json`, but an exports map that
+   deliberately does not export `./package.json` (baseline AND fixed package
+   alike) always throws. Fixed the ORACLE, not the package: resolve the root
+   entry and derive the package root; the resolved path is printed for the
+   build log and asserted to stay inside the consumer directory.
+2. **`vite build` failure on the BASELINE package** — `Missing "./workspace"
+   specifier`: this is the F1 defect itself, preserved as evidence (§7.1),
+   fixed by the subpath export.
+3. **`C6a` FAIL on the first fixed-package run (404 from the local test
+   server)** — the new check assumed every dispatch is visible to a page
+   `fetch` recorder. The runtime's documented backend decision routes
+   cross-origin side-effecting requests through the SAME-ORIGIN
+   `POST /fetch` envelope (a debug probe confirmed
+   `backend: "edge-relay"`); the recorder never sees them. Fix: the oracle
+   now covers BOTH dispatch paths — the page recorder for browser-direct
+   (GET allow control) and a counting stub on the consumer's own test server
+   for the relay envelope (POST allow control) — each with its positive
+   control, deny then asserts BOTH counters move by zero. No runtime rule
+   was relaxed and the stub forwards nothing anywhere.
+4. **`C9b` FAIL (`newGlobals: ["0","__consumer"]`, gate's own bug)** — the
+   purity probe snapshotted window keys at module top, so the driver's own
+   boot-time names counted as "leaks". Fixed: the snapshot is taken
+   immediately around the dynamic import (the property actually under
+   test).
+5. **`C9c` FAIL (`listRoot` missing `c.txt`)** — the scenario listed the
+   root before writing the inner-`..` entry. Reordered; the check is
+   unchanged.
+6. **`npm install` kept the OLD package after swapping the tarball** — the
+   consumer's lockfile pinned the first tarball's integrity. Removed
+   lockfile + node_modules and reinstalled (CI assembles in a fresh
+   directory and never hits this).
+7. **`HEAD:src/workspace-api.js` present before commit** — the file was
+   staged mid-round; verified post-commit instead. (Process note, no gate
+   impact.)
+
+### 7.5 Carried-forward results vs. this round
+
+- Carried forward from the extraction round (§1, unchanged code — NOT
+  re-executed locally this round): grep 19, network 60, python-authority 56,
+  python-browser-authority 102, python-bootstrap 27, python-plugin-runtime
+  33, active-content 3, and the 23-suite unit battery's pre-existing
+  checks (re-run green this round — the battery IS part of §7.3's `npm
+  test`).
+- The historical **python-authority E3 `SystemError`** question stays OPEN
+  and untouched (see §3; root cause not confirmed, follow-up experiment
+  still pending). It is a DIFFERENT subject from this round's network
+  dispatch-counting finding — this round's green C6a/b/c says nothing about
+  it and must not be read as its resolution.
+
+### 7.6 CI isolation + docs
+
+- The consumer CI job now assembles the consumer under
+  `${{ runner.temp }}/locus-consumer-e2e` (fixture page, generic Chrome
+  driver `tests/helpers/chrome.cjs` copied as the driver, gate, tarball) and
+  installs/runs there — no checkout-internal consumer directory, no
+  fallback to checkout `node_modules`/`src`. The gate prints the resolved
+  package location (C0b asserts it is inside the consumer's own
+  `node_modules`).
+- `PROVENANCE.md`'s claim that the per-file map carries source blobs is now
+  TRUE: EXTRACTION-PLAN §2 has the source-blob column (real
+  `git rev-parse <baseline>:<path>` values; the wheel fixture row carries
+  the directory TREE sha; split/new files say so explicitly — no
+  target-file hash substituted for a source blob).
+- README's Development order is now `npm ci` → `npm run build` → `npm test`
+  → `npm run test:e2e`, with the boundary-G5 build-artifact dependency
+  stated (fail-closed, no skip-when-absent fallback).
+
+### 7.7 Unverified scope / honest boundary of this round
+
+- The full 8-gate browser battery was not re-run locally this round (code
+  unchanged; rationale in §7.3). CI runs it on the pushed head.
+- CI on the pushed head is the acceptance evidence for the new consumer-job
+  isolation shape on ubuntu-latest; the local rehearsal ran on Windows.
+- The consumer gate's OPFS scenario runs in a real Chrome profile — it
+  creates and removes ONLY its test-named directory
+  (`locus-consumer-gate-<random>`); no user storage is touched.
+- No model, paid API or real relay is contacted. The synthetic test target
+  is never really fetched (recorder + stub answer deterministically). REAL
+  network in this round's runs: only the pre-existing consumer Python
+  bootstrap download from the pinned jsDelivr CDN (recorded, as before).
