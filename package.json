@@ -1,0 +1,26 @@
+{
+  "name": "locus-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Locus Runtime — browser-local Unix-like execution substrate: Linux-like VFS, shell, verified Pyodide bootstrap, isolated grep workers, bounded anonymous network transport.",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": "./src/index.js",
+    "./worker-assets": "./src/worker-assets.js"
+  },
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
+    "test": "node tests/run-unit.cjs",
+    "test:e2e": "node tests/e2e.cjs"
+  },
+  "devDependencies": {
+    "vite": "^6.0.7"
+  }
+}

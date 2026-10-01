@@ -2,3 +2,9 @@ node_modules/
 dist/
 *.log
 package.tgz
+node_modules/
+dist/
+*.log
+package.tgz
+tmp*
+/tmp

@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "skill": {
+    "id": "test-workflow",
+    "version": "1",
+    "displayName": "Test Workflow",
+    "description": "TEST ONLY guidance for the package test capability."
+  },
+  "source": "SKILL.md"
+}

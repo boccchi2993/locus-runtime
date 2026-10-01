@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Locus Runtime — standalone host</title>
+</head>
+<body>
+<!--
+  TRULY STANDALONE RUNTIME HOST (a test/example page, never a second
+  product implementation).
+
+  NO classic scripts at all — the page imports the public entry as one ES
+  module. M3a: the implementation modules are the package's own ES
+  modules (no assembly, no registry, no dynamic self-assembly chunk). No
+  global VFS constructors: hosts build filesystems through the entry's
+  createWorkspace/createMemoryWorkspace exports. No Harness, no Product
+  page, no Vue, no persistence, no Locus DOM: worker sources arrive
+  through createRuntime({ workerAssets }), status arrives through
+  session.onStatus.
+
+  The window.__host e2e seam exposes exactly what the browser gates
+  drive: the session, the interpreter accessor, a scripted execution
+  authorization port factory, and the worker asset strings.
+-->
+<script type="module">
+import { createRuntime, createWorkspace, createMemoryWorkspace, shellCommandNames }
+  from '../src/index.js';
+import { PY_WORKER_SOURCE, GREP_WORKER_SOURCE } from '../src/worker-assets.js';
+// TEST-ONLY exposure: the grep browser gate instruments the documented
+// _workerFactory seam (real Blob workers, counted create/terminate pairs).
+import { GrepRegexRuntime } from '../src/shell.js';
+
+const log = [];
+const errors = [];
+window.addEventListener('error', (e) => errors.push(String(e.message || e)));
+window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejection: ' + String(e.reason && e.reason.message || e.reason)));
+
+const statusEvents = [];
+(async () => {
+const host = await createRuntime({
+  workerAssets: { pyWorkerSource: PY_WORKER_SOURCE, grepWorkerSource: GREP_WORKER_SOURCE },
+});
+const session = host.createSession();
+session.onStatus((snap) => { statusEvents.push(snap); });
+
+// The session's task filesystem: plain runtime VFS exports with a scratch
+// workspace mount (the host decides mounts — exactly what a product
+// adapter does in Locus). No classic global anywhere.
+function makeVfs() {
+  const vfs = createWorkspace();
+  vfs.mount('/mnt/workspace', createMemoryWorkspace({ name: 'workspace' }), 'read-write');
+  return vfs;
+}
+const vfs = makeVfs();
+
+// Tool-shaped execution through the PUBLIC session (the same mapping the
+// product tool adapter's bash branch performs: res.ok → success).
+async function exec(input, context) {
+  const res = await session.execute({
+    kind: 'shell',
+    input,
+    context: Object.assign({ filesystem: vfs }, context || {}),
+  });
+  return { output: res.output, success: !!res.ok, isError: !!res.isError, backend: res.backend, operation: res.operation, ok: res.ok, boundary: res.boundary };
+}
+
+async function runPython(code) {
+  const t0 = performance.now();
+  const res = await session.execute({ kind: 'python', input: code, context: { filesystem: vfs } });
+  return { ms: Math.round(performance.now() - t0), ok: res.ok, output: res.stdout, stderr: res.stderr, error: res.error, success: !!res.ok };
+}
+
+// A scripted implementation of the execution-authorization port: the
+// driver installs a decider (allow/deny/cancel/park) per test and reads
+// the recorded asks. No approval UI exists in the Runtime — decisions are
+// the port's contract (deny ≠ cancel, scope once/session).
+function makeAuthorization() {
+  const state = { requests: [], decider: () => ({ outcome: 'allow', scope: 'once' }) };
+  return {
+    state,
+    port: {
+      request: (req, opts) => {
+        state.requests.push({ req, signal: opts && opts.signal });
+        return Promise.resolve(state.decider(req, opts));
+      },
+    },
+  };
+}
+
+// A parking VFS for the lifecycle gate: a DEDICATED session whose write()
+// stalls on a path behind an openable gate, so the page can hold an
+// execute mid-flight and observe the boundary semantics live
+// (deterministic — the gate opens only when the driver asks).
+function makeParkingVfs() {
+  const inner = makeVfs();
+  const session = host.createSession();
+  const p = { session, vfs: inner, log: [], gate: Promise.resolve(), open: () => {}, parkPath: null };
+  p.hold = (path) => {
+    p.parkPath = path;
+    p.gate = new Promise((r) => { p.open = r; });
+  };
+  const innerWrite = inner.write.bind(inner);
+  inner.write = async (path, text) => {
+    p.log.push('write:enter:' + path);
+    if (path === p.parkPath) {
+      p.log.push('write:park:' + path);
+      await p.gate;
+      p.log.push('write:resume:' + path);
+    }
+    const out = await innerWrite(path, text);
+    p.log.push('write:commit:' + path);
+    return out;
+  };
+  return p;
+}
+
+window.__host = {
+  host,
+  session,
+  vfs,
+  makeVfs,
+  makeParkingVfs,
+  makeAuthorization,
+  exec,
+  // gate alias: the browser host battery drives shell work through `run`.
+  run: (input, context) => exec(input, context),
+  runPython,
+  log,
+  errors,
+  // e2e parity alias: browser gates read window.__e2eErrors for the
+  // no-unhandled-errors check.
+  __e2eErrors: errors,
+  statusEvents,
+  capabilities: () => host.capabilities(),
+  GrepRegexRuntime,
+  workerAssets: { grepWorkerSource: GREP_WORKER_SOURCE, pyWorkerSourceLength: PY_WORKER_SOURCE.length },
+  assembly: () => ({
+    classicScriptTags: document.querySelectorAll('script[src]:not([type="module"])').length,
+    shellCommands: shellCommandNames().length,
+    registryPresent: !!window.__LOCUS_RUNTIME_CORE__,
+  }),
+  cdnFetches: () => performance.getEntriesByType('resource')
+    .filter((r) => r.name.indexOf('cdn.jsdelivr.net') !== -1).map((r) => r.name),
+  ready: true,
+};
+document.title = 'runtime-host-ready';
+})().catch((e) => {
+  errors.push('boot failed: ' + (e && e.message ? e.message : String(e)));
+  document.title = 'runtime-host-boot-failed';
+});
+</script>
+</body>
+</html>
