@@ -16,6 +16,10 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # the unit gate includes the boundary suite, whose G5 section scans the
+      # BUILT bundle — build first (the documented local order is the same:
+      # npm ci && npm run build && npm test)
+      - run: npm run build
       - run: npm test
       - name: import purity
         run: node tools/verify-import-purity.mjs
