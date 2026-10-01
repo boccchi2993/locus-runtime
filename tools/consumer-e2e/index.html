@@ -6,12 +6,28 @@
 </head>
 <body>
 <!--
-  MINIMAL OUT-OF-REPO CONSUMER (M3a exit gate).
+  MINIMAL OUT-OF-REPO CONSUMER (M3a exit gate; review round 1).
 
   This page lives in its own directory outside the locus-runtime checkout.
-  It imports ONLY the package's public exports ('locus-runtime' and
-  'locus-runtime/worker-assets') — no source paths, no sibling checkouts,
-  no symlinks. Its own build tool is vite (devDependency of THIS project).
+  It imports ONLY the package's public exports ('locus-runtime',
+  'locus-runtime/workspace', 'locus-runtime/worker-assets') — no source
+  paths, no sibling checkouts, no symlinks. Its own build tool is vite
+  (devDependency of THIS project).
+
+  Driver-level pieces the gate drives:
+  - a NARROW fetch recorder for the synthetic test target only (F3/C6):
+    matched requests are counted and answered deterministically, NEVER
+    fetched for real; every other request (Pyodide CDN, …) is delegated
+    to the page's real fetch untouched. Installed BEFORE any runtime
+    network operation, at the very top of this module.
+  - makeParkingVfs: an execution probe whose provider write PARKS on a
+    gated path. `entered` resolves when the write is truly dispatched
+    (provider entered the park), `release()` decides when it settles,
+    `log` records every transition. No fixed sleeps: ordering is proven
+    by these barriers (F2/C4).
+  - scenario helpers (f1LocalDirectory / f1Opfs / f1CustomProvider) that
+    return structured results for the gate to assert on (F1/C9). Each
+    holds its own session/vfs and cleans up in finally.
 -->
 <script type="module">
 import {
@@ -21,6 +37,33 @@ import {
   shellCommandNames,
 } from 'locus-runtime';
 import { PY_WORKER_SOURCE, GREP_WORKER_SOURCE } from 'locus-runtime/worker-assets';
+
+// ---- F3/C6: the narrow network recorder. Installed FIRST — before the
+// runtime is constructed, before anything can dispatch. Only the fixed
+// synthetic https test target is intercepted (counted + deterministic
+// Response); the real fetch handles everything else unchanged.
+const NET_TARGET = 'https://consumer-gate-counted.test';
+const net = { target: NET_TARGET, dispatched: [] };
+const realFetch = window.fetch.bind(window);
+window.fetch = function (input, init) {
+  const url = typeof input === 'string' ? input : (input && input.url) || String(input);
+  if (String(url).startsWith(NET_TARGET)) {
+    net.dispatched.push((init && init.method ? init.method : 'GET') + ' ' + String(url));
+    return Promise.resolve(new Response('counted-ok', {
+      status: 200, headers: { 'content-type': 'text/plain' },
+    }));
+  }
+  return realFetch(input, init);
+};
+
+// ---- shared timeout helper: every wait has a labeled deadline so a
+// broken barrier FAILS LOUDLY instead of hanging the gate.
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('consumer-gate timeout after ' + ms + 'ms: ' + label)), ms)),
+  ]);
+}
 
 const errors = [];
 window.addEventListener('error', (e) => errors.push(String(e.message || e)));
@@ -42,27 +85,54 @@ window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejec
   }
   const vfs = makeVfs();
 
-  // A parking VFS for the boundary gate: a dedicated session whose write
-  // stalls on a gated path (the driver decides when the write commits).
+  // F2/C4 probe: a dedicated session whose provider write parks on a
+  // gated path. `entered` is an explicit Promise (the write IS dispatched
+  // and parked); `release()` decides when it settles; `log` records every
+  // transition. No timers — the gate awaits the barriers.
   function makeParkingVfs() {
     const inner = makeVfs();
     const s = host.createSession();
-    const p = { session: s, vfs: inner, log: [], gate: Promise.resolve(), open: () => {}, parkPath: null };
-    p.hold = (path) => {
-      p.parkPath = path;
-      p.gate = new Promise((r) => { p.open = r; });
+    const p = {
+      session: s, vfs: inner, log: [], parkedPath: null,
+      entered: null, release: () => {},
+      execPromise: null, settled: false, result: null, rejection: null,
     };
+    let enterResolve = null;
+    let openGate = () => {};
+    p.hold = (path) => {
+      p.parkedPath = path;
+      p.entered = new Promise((r) => { enterResolve = r; });
+      p.gate = new Promise((r) => { openGate = r; });
+    };
+    p.release = () => { openGate(); };
     const innerWrite = inner.write.bind(inner);
     inner.write = async (path, text) => {
       p.log.push('write:enter:' + path);
-      if (path === p.parkPath) {
+      if (path === p.parkedPath) {
         p.log.push('write:park:' + path);
+        if (enterResolve) enterResolve();
         await p.gate;
         p.log.push('write:resume:' + path);
       }
       const out = await innerWrite(path, text);
       p.log.push('write:commit:' + path);
       return out;
+    };
+    p.exec = (input, contextExtra) => {
+      p.execPromise = s.execute({
+        kind: 'shell',
+        input,
+        context: Object.assign({ filesystem: inner }, contextExtra || {}),
+      }).then(
+        (res) => { p.settled = true; p.result = res; return res; },
+        (e) => { p.settled = true; p.rejection = e; throw e; },
+      );
+      return p.execPromise;
+    };
+    // Cleanup that can never hang: settle the park, then retire the session.
+    p.cleanup = () => {
+      try { p.release(); } catch (e) { /* idempotent */ }
+      if (!s.status().disposed) s.dispose('probe cleanup');
     };
     return p;
   }
@@ -106,9 +176,347 @@ window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejec
     return { ok: res.ok, output: res.stdout, stderr: res.stderr };
   }
 
+  // ---------- F1/C9: the workspace provider subpath ----------
+  async function importWorkspaceSubpath() {
+    // The purity oracle is LOCAL to this import: snapshot the window keys
+    // immediately before/after the dynamic import, so the driver's own
+    // boot-time names (__consumer, …) never count as "leaks".
+    const before = new Set(Object.getOwnPropertyNames(window));
+    try {
+      const api = await import('locus-runtime/workspace');
+      window.__consumer.workspaceApi = api;
+      return {
+        ok: true,
+        exports: Object.keys(api).sort(),
+        kinds: {
+          WorkspaceAdapter: typeof api.WorkspaceAdapter,
+          LocalDirectoryWorkspace: typeof api.LocalDirectoryWorkspace,
+          OPFSWorkspace: typeof api.OPFSWorkspace,
+          normalizeWorkspacePath: typeof api.normalizeWorkspacePath,
+          ensureWorkspacePermission: typeof api.ensureWorkspacePermission,
+          vfsError: typeof api.vfsError,
+        },
+        newGlobals: Object.getOwnPropertyNames(window).filter((k) => !before.has(k)),
+      };
+    } catch (e) {
+      return { ok: false, name: e && e.name, message: String(e && e.message || e) };
+    }
+  }
+
+  // A WebIDL-conforming directory-handle stub backed by a JS object tree
+  // (same technique as the package's own workspace unit suite): NO real
+  // directory picker is ever shown.
+  function makeDirStub(name) {
+    const files = new Map();
+    const dirs = new Map();
+    const stub = {
+      name, kind: 'directory', blockedNames: new Set(),
+      async getDirectoryHandle(n, opts) {
+        if (dirs.has(n)) return dirs.get(n);
+        if (files.has(n)) { const e = new Error('kind mismatch'); e.name = 'TypeMismatchError'; throw e; }
+        if (!opts || !opts.create) { const e = new Error('missing'); e.name = 'NotFoundError'; throw e; }
+        const d = makeDirStub(n); dirs.set(n, d); return d;
+      },
+      async getFileHandle(n, opts) {
+        if (stub.blockedNames.has(n)) { const e = new Error('permission'); e.name = 'NotAllowedError'; throw e; }
+        if (files.has(n)) return files.get(n);
+        if (dirs.has(n)) { const e = new Error('kind mismatch'); e.name = 'TypeMismatchError'; throw e; }
+        if (!opts || !opts.create) { const e = new Error('missing'); e.name = 'NotFoundError'; throw e; }
+        const f = {
+          name: n, kind: 'file', bytes: new Uint8Array(0),
+          async getFile() {
+            return { size: this.bytes.byteLength, lastModified: 1, arrayBuffer: async () => this.bytes.buffer.slice(this.bytes.byteOffset, this.bytes.byteOffset + this.bytes.byteLength) };
+          },
+          async createWritable() {
+            const fh = this;
+            return {
+              write: async (d) => { fh.bytes = typeof d === 'string' ? new TextEncoder().encode(d) : new Uint8Array(d); },
+              close: async () => {},
+            };
+          },
+        };
+        files.set(n, f); return f;
+      },
+      async removeEntry(n) {
+        if (files.has(n)) { files.delete(n); return; }
+        if (dirs.has(n)) { dirs.delete(n); return; }
+        const e = new Error('missing'); e.name = 'NotFoundError'; throw e;
+      },
+      async *entries() {
+        for (const [n, d] of dirs) yield [n, d];
+        for (const [n, f] of files) yield [n, f];
+      },
+    };
+    return stub;
+  }
+
+  async function f1LocalDirectory() {
+    const out = {};
+    const W = window.__consumer.workspaceApi;
+    // write/read through a controlled handle (no picker), incl. a nested dir
+    const dir = makeDirStub('picked-folder');
+    const ws = new W.LocalDirectoryWorkspace(dir);
+    await ws.write('a/b.txt', 'hello-local');
+    out.readBack = await ws.read('a/b.txt');
+    // '..' INSIDE the tree still resolves (existing semantics preserved) —
+    // written BEFORE the listing so the listing proves both entries.
+    await ws.write('a/../c.txt', 'resolved');
+    out.dotdotResolved = await ws.read('c.txt');
+    out.listRoot = (await ws.list('')).map((e) => e.name + ':' + e.kind);
+    out.providerName = ws.name;
+    // the shared normalization: '..' past the root and drive letters refuse
+    try { W.normalizeWorkspacePath('../escape'); out.escapeRejected = false; }
+    catch (e) { out.escapeRejected = /path escapes workspace/.test(e.message); }
+    try { W.normalizeWorkspacePath('C:/win'); out.driveRejected = false; }
+    catch (e) { out.driveRejected = /invalid path/.test(e.message); }
+    // permission helper: denied stays false, prompt→granted true, no-API true
+    out.permissionDenied = await W.ensureWorkspacePermission({
+      queryPermission: async () => 'denied', requestPermission: async () => 'denied',
+    }) === false;
+    out.permissionPromptGranted = await W.ensureWorkspacePermission({
+      queryPermission: async () => 'prompt', requestPermission: async () => 'granted',
+    }) === true;
+    out.permissionNoApi = await W.ensureWorkspacePermission({}) === true;
+    // a real NotAllowedError from the handle propagates honestly (never swallowed)
+    const blocked = makeDirStub('blocked');
+    blocked.blockedNames.add('x.txt');
+    const wsBlocked = new W.LocalDirectoryWorkspace(blocked);
+    let writeError = null;
+    try { await wsBlocked.write('x.txt', 'v'); } catch (e) { writeError = e; }
+    out.blockedWriteName = writeError && writeError.name;
+    return out;
+  }
+
+  // The durable-provider proof: the consumer takes a TEMPORARY OPFS
+  // directory (test-specific name, removed in finally), mounts an
+  // OPFSWorkspace, writes through the session shell, and reads back with a
+  // FRESH provider instance — a second in-memory double could not pass this.
+  async function f1Opfs() {
+    const out = {};
+    const W = window.__consumer.workspaceApi;
+    const root = await navigator.storage.getDirectory();
+    const dirName = 'locus-consumer-gate-' + Math.random().toString(36).slice(2, 10);
+    out.dirName = dirName;
+    const dir = await root.getDirectoryHandle(dirName, { create: true });
+    let session2 = null;
+    try {
+      const provider = new W.OPFSWorkspace(dir, { name: 'gate-opfs' });
+      const vfs2 = makeVfs();
+      vfs2.mount('/mnt/workspace', provider, 'read-write');
+      session2 = host.createSession();
+      const r = await session2.execute({
+        kind: 'shell',
+        input: 'echo durable-opfs > /mnt/workspace/probe.txt && cat /mnt/workspace/probe.txt',
+        context: { filesystem: vfs2 },
+      });
+      out.shellWriteRead = { ok: r.ok, output: r.output };
+      // A brand-new provider instance over the SAME handle reads the bytes
+      // off the (real, durable) filesystem — not from any memory copy.
+      const fresh = new W.OPFSWorkspace(dir, { name: 'gate-opfs-fresh' });
+      out.freshRead = await fresh.read('probe.txt');
+      out.freshList = (await fresh.list('')).map((e) => e.name);
+      out.mountedProvider = vfs2.mounts.some((m) => m.path === '/mnt/workspace' && m.provider === provider);
+    } finally {
+      await root.removeEntry(dirName, { recursive: true });
+      if (session2 && !session2.status().disposed) session2.dispose('opfs probe cleanup');
+    }
+    // cleanup is real: the directory is gone
+    try { await root.getDirectoryHandle(dirName); out.cleaned = false; }
+    catch (e) { out.cleaned = true; }
+    return out;
+  }
+
+  // A minimal HOST-CUSTOM provider built ONLY from the public surface
+  // (extends WorkspaceAdapter, normalizes through normalizeWorkspacePath,
+  // throws through vfsError) — mounted and exercised through a session.
+  async function f1CustomProvider() {
+    const out = {};
+    const W = window.__consumer.workspaceApi;
+    class ConsumerBoxWorkspace extends W.WorkspaceAdapter {
+      constructor(opts) {
+        super();
+        this.name = (opts && opts.name) || 'consumer-box';
+        this.files = new Map();
+      }
+      _rel(path) { return W.normalizeWorkspacePath(path); }
+      async write(path, data) {
+        this.files.set(this._rel(path), typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data));
+      }
+      async read(path) {
+        const b = this.files.get(this._rel(path));
+        if (!b) throw W.vfsError('NotFoundError', 'no such file or directory: ' + path);
+        return new TextDecoder('utf-8').decode(b);
+      }
+      async readBytes(path) {
+        const b = this.files.get(this._rel(path));
+        if (!b) throw W.vfsError('NotFoundError', 'no such file or directory: ' + path);
+        return b.slice();
+      }
+      async remove(path) {
+        if (!this.files.delete(this._rel(path))) throw W.vfsError('NotFoundError', 'no such file: ' + path);
+      }
+      async mkdir() { /* flat box */ }
+      async list() { return Array.from(this.files.keys()).map((n) => ({ name: n, kind: 'file' })); }
+      async stat(path) {
+        const b = this.files.get(this._rel(path));
+        if (!b) throw W.vfsError('NotFoundError', 'no such file or directory: ' + path);
+        return { kind: 'file', size: b.byteLength, modified: null };
+      }
+      async exists(path) {
+        try { await this.stat(path); return true; }
+        catch (e) { if (e && e.name === 'NotFoundError') return false; throw e; }
+      }
+    }
+    const box = new ConsumerBoxWorkspace({ name: 'consumer-box' });
+    const vfs3 = makeVfs();
+    vfs3.mount('/mnt/box', box, 'read-write');
+    const session3 = host.createSession();
+    try {
+      const r = await session3.execute({
+        kind: 'shell',
+        input: 'echo boxed > /mnt/box/x.txt && cat /mnt/box/x.txt',
+        context: { filesystem: vfs3 },
+      });
+      out.shellWriteRead = { ok: r.ok, output: r.output };
+      out.providerReceivedWrite = box.files.has('x.txt');
+      out.vfsReadsProvider = (await vfs3.read('/mnt/box/x.txt')) === 'boxed\n';
+      // the provider's own boundary: escape attempts refuse through the
+      // SHARED normalization
+      try { await box.write('../outside.txt', 'x'); out.providerEscapeRejected = false; }
+      catch (e) { out.providerEscapeRejected = /path escapes workspace/.test(e.message); }
+      // NotFoundError classification: exists() is false, not a thrown fault
+      out.missingIsFalse = (await vfs3.exists('/mnt/box/never.txt')) === false;
+      const rm = await session3.execute({ kind: 'shell', input: 'rm /mnt/box/x.txt', context: { filesystem: vfs3 } });
+      out.removedThroughVfs = rm.ok === true && box.files.size === 0;
+    } finally {
+      if (!session3.status().disposed) session3.dispose('custom provider cleanup');
+    }
+    return out;
+  }
+
+  // ---------- F2/C4 scenarios ----------
+  // Each scenario runs INSIDE one async function with a labeled timeout on
+  // every wait and a finally that settles the park and retires the session,
+  // so a failing assertion can never leave a parked promise hanging the
+  // gate. The gate asserts on the returned structure.
+
+  // Composite shell whose FIRST write parks; a CALLER abort lands while it
+  // is dispatched-but-unsettled; the second write must never dispatch.
+  async function scenarioMidFlightAbort() {
+    const p = makeParkingVfs();
+    const ac = new AbortController();
+    try {
+      p.hold('/mnt/workspace/first.txt');
+      p.exec('echo first > /mnt/workspace/first.txt && echo second > /mnt/workspace/second.txt', { signal: ac.signal });
+      await withTimeout(p.entered, 5000, 'mid-abort: the first write never reached the provider park');
+      const busyAtPark = p.session.status().busyExecutions;
+      const settledAtPark = p.settled;
+      ac.abort();
+      const busyAfterAbort = p.session.status().busyExecutions;
+      p.release();
+      const res = await withTimeout(p.execPromise, 5000, 'mid-abort: execute did not settle after release');
+      const after = await p.session.execute({ kind: 'shell', input: 'echo still-usable', context: { filesystem: p.vfs } });
+      return {
+        busyAtPark, settledAtPark, busyAfterAbort,
+        res: { ok: res.ok, isError: !!res.isError, output: res.output, boundary: res.boundary },
+        busyFinal: p.session.status().busyExecutions,
+        committedFirst: await p.vfs.exists('/mnt/workspace/first.txt'),
+        dispatchedSecond: p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/second.txt')),
+        after: { ok: after.ok, output: after.output },
+        log: p.log,
+      };
+    } finally { p.cleanup(); }
+  }
+
+  // A dispose lands while the first write of a composite shell is
+  // dispatched-but-unsettled: the busy count stays TRUE until release,
+  // the settled write is kept, nothing dispatches after, and the session
+  // refuses execute AND prepare forever with the same first reason.
+  async function scenarioMidFlightDispose() {
+    const p = makeParkingVfs();
+    try {
+      p.hold('/mnt/workspace/d1.txt');
+      p.exec('echo d1 > /mnt/workspace/d1.txt && echo d2 > /mnt/workspace/d2.txt');
+      await withTimeout(p.entered, 5000, 'mid-dispose: the first write never reached the provider park');
+      const busyAtPark = p.session.status().busyExecutions;
+      p.session.dispose('consumer mid-flight dispose');
+      const busyAfterDispose = p.session.status().busyExecutions;
+      p.release();
+      const res = await withTimeout(p.execPromise, 5000, 'mid-dispose: execute did not settle after release');
+      let executeRejection = null;
+      try { await p.session.execute({ kind: 'shell', input: 'echo nope', context: { filesystem: p.vfs } }); }
+      catch (e) { executeRejection = String(e && e.message || e); }
+      let prepareRejection = null;
+      try { await p.session.prepare({}); }
+      catch (e) { prepareRejection = String(e && e.message || e); }
+      let secondDisposeError = null;
+      try { p.session.dispose('second dispose call'); } catch (e) { secondDisposeError = String(e && e.message || e); }
+      return {
+        busyAtPark, busyAfterDispose,
+        res: { ok: res.ok, isError: !!res.isError, output: res.output, boundary: res.boundary },
+        busyFinal: p.session.status().busyExecutions,
+        committedFirst: await p.vfs.exists('/mnt/workspace/d1.txt'),
+        dispatchedSecond: p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/d2.txt')),
+        executeRejection, prepareRejection, secondDisposeError,
+        log: p.log,
+      };
+    } finally { p.cleanup(); }
+  }
+
+  // The strengthened reset boundary: explicit pre-release unsettled/busy
+  // assertions, then the honest boundary report and a reusable session.
+  async function scenarioResetBoundary() {
+    const p = makeParkingVfs();
+    try {
+      p.hold('/mnt/workspace/first.txt');
+      p.exec('echo first > /mnt/workspace/first.txt && echo second > /mnt/workspace/second.txt');
+      await withTimeout(p.entered, 5000, 'reset: the first write never reached the provider park');
+      const busyAtPark = p.session.status().busyExecutions;
+      const settledAtPark = p.settled;
+      p.session.reset('consumer boundary');
+      const busyAfterReset = p.session.status().busyExecutions;
+      p.release();
+      const res = await withTimeout(p.execPromise, 5000, 'reset: execute did not settle after release');
+      const after = await p.session.execute({ kind: 'shell', input: 'echo still-usable', context: { filesystem: p.vfs } });
+      return {
+        busyAtPark, settledAtPark, busyAfterReset,
+        res: { ok: res.ok, isError: !!res.isError, output: res.output, boundary: res.boundary },
+        busyFinal: p.session.status().busyExecutions,
+        committedFirst: await p.vfs.exists('/mnt/workspace/first.txt'),
+        dispatchedSecond: p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/second.txt')),
+        after: { ok: after.ok, output: after.output },
+        log: p.log,
+      };
+    } finally { p.cleanup(); }
+  }
+
+  // The LAST side effect of the run parks (no following command) and a
+  // caller abort lands in the dispatched-but-unsettled window. The control
+  // variant proves the parking mechanism itself never downgrades a run.
+  async function scenarioLastWrite(control) {
+    const p = makeParkingVfs();
+    const ac = new AbortController();
+    try {
+      p.hold('/mnt/workspace/only.txt');
+      p.exec('echo pre && echo data > /mnt/workspace/only.txt', control ? undefined : { signal: ac.signal });
+      await withTimeout(p.entered, 5000, (control ? 'last-write control' : 'last-write abort') + ': the write never reached the provider park');
+      if (!control) ac.abort();
+      p.release();
+      const res = await withTimeout(p.execPromise, 5000, 'last-write: execute did not settle after release');
+      return {
+        res: { ok: res.ok, isError: !!res.isError, output: res.output, boundary: res.boundary },
+        committedFact: await p.vfs.read('/mnt/workspace/only.txt'),
+        log: p.log,
+      };
+    } finally { p.cleanup(); }
+  }
+
   window.__consumer = {
     host, session, vfs, makeVfs, makeParkingVfs, policy, authorization, authState,
-    exec, runPython, errors, statusEvents,
+    exec, runPython, errors, statusEvents, net,
+    importWorkspaceSubpath, f1LocalDirectory, f1Opfs, f1CustomProvider,
+    scenarioMidFlightAbort, scenarioMidFlightDispose, scenarioResetBoundary, scenarioLastWrite,
+    withTimeout,
     capabilities: () => host.capabilities(),
     describeCommands: () => session.describeCommands(),
     commands: shellCommandNames(),

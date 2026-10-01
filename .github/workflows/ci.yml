@@ -62,19 +62,28 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm pack
-      - name: assemble the consumer from the tarball alone
+      # ISOLATION (review round 1): the consumer is assembled and run in a
+      # directory UNDER RUNNER_TEMP, never inside the checkout — it cannot
+      # fall back to the checkout's node_modules, src or sibling paths. Only
+      # test infrastructure is copied: the fixture page, the generic Chrome
+      # driver, the gate and the tarball. No Runtime implementation file is
+      # a consumer dependency.
+      - name: assemble the consumer OUTSIDE the checkout (RUNNER_TEMP)
         run: |
-          mkdir -p consumer-e2e
-          cp locus-runtime-*.tgz consumer-e2e/locus-runtime.tgz
-          cp tools/consumer-e2e/package.json consumer-e2e/
-          cp tools/consumer-e2e/index.html consumer-e2e/
-          cp tools/consumer-e2e/consumer-gate.cjs consumer-e2e/
-          cp tests/helpers/chrome.cjs consumer-e2e/chrome-driver.cjs
+          CONSUMER_DIR="${{ runner.temp }}/locus-consumer-e2e"
+          mkdir -p "$CONSUMER_DIR"
+          cp locus-runtime-*.tgz "$CONSUMER_DIR/locus-runtime.tgz"
+          cp tools/consumer-e2e/package.json "$CONSUMER_DIR/"
+          cp tools/consumer-e2e/index.html "$CONSUMER_DIR/"
+          cp tools/consumer-e2e/consumer-gate.cjs "$CONSUMER_DIR/"
+          cp tests/helpers/chrome.cjs "$CONSUMER_DIR/chrome-driver.cjs"
+          echo "CONSUMER_DIR=$CONSUMER_DIR" >> "$GITHUB_ENV"
+          echo "consumer assembled at: $CONSUMER_DIR"
       - name: install (tarball + the consumer's own build tool only)
-        working-directory: consumer-e2e
+        working-directory: ${{ env.CONSUMER_DIR }}
         run: npm install
       - name: run the consumer browser gate
-        working-directory: consumer-e2e
+        working-directory: ${{ env.CONSUMER_DIR }}
         run: |
           CHROME=$(which google-chrome || which chromium || true)
           export CHROME
