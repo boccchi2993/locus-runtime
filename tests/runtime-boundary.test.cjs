@@ -45,10 +45,15 @@ const HOST_FILES = [
   'src/index.js',
   'src/lib/utf8.js',
   'src/workspace.js',
+  'src/workspace-api.js',
   'src/vfs.js',
   'src/network.js',
   'src/shell.js',
 ];
+// The public ENTRY files: everything a consumer can import directly.
+// The entry rules (no window/DOM work, closure inside the runtime set)
+// apply to every one of them.
+const ENTRY_FILES = ['src/index.js', 'src/workspace-api.js'];
 const RUNTIME_FILES = HOST_FILES.concat(['src/worker-assets.js']);
 
 // Harness/Product module names that must NEVER appear as a dependency of
@@ -200,8 +205,16 @@ function finish() {
     check('G6c zero eval/new Function host-side source assembly', evalHits.length === 0, JSON.stringify(evalHits));
 
     const entrySrc = stripComments(read('src/index.js'));
-    check('G6d the entry performs no window or DOM work',
-      !/\bwindow\b/.test(entrySrc) && !/document\./.test(entrySrc), 'window/document reference in entry');
+    const wsApiSrc = stripComments(read('src/workspace-api.js'));
+    check('G6d the entries perform no window or DOM work',
+      !/\bwindow\b/.test(entrySrc) && !/document\./.test(entrySrc)
+      && !/\bwindow\b/.test(wsApiSrc) && !/document\./.test(wsApiSrc),
+      'window/document reference in an entry');
+    // The provider subpath must stay a ONE-WAY re-export surface: any
+    // local function/class body would be a second implementation.
+    check('G6e the workspace subpath declares no implementation (pure re-exports)',
+      !/\b(?:async\s+)?function\s|\bclass\s/.test(wsApiSrc),
+      wsApiSrc.slice(0, 200));
   }
 
   // ---------- G7: the entry's TRANSITIVE ESM dependency closure ----------
@@ -230,6 +243,7 @@ function finish() {
       }
     };
     walk('src/index.js');
+    walk('src/workspace-api.js'); // the provider subpath is a second public entry
     const ALLOWED = new Set(RUNTIME_FILES);
     const outside = Array.from(seen).filter((f) => !ALLOWED.has(f));
     check('G7 the entry\u2019s transitive import closure stays inside the Runtime set',

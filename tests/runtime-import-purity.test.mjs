@@ -92,6 +92,49 @@ check('SA3b createMemoryWorkspace builds immediately',
     JSON.stringify({ dom: domTouched, status: session.status() }));
 }
 
+// ---------- SA5: the workspace provider subpath export ----------
+// The "locus-runtime/workspace" subpath is the PUBLIC provider surface
+// (M3a review F1): provider classes, the shared path normalization, the
+// permission helper and the error factory. It must re-export the ONE
+// implementation (identity, not a copy) and import as purely as the root.
+{
+  const wsImpl = await import('../src/workspace.js');
+  const vfsImpl = await import('../src/vfs.js');
+  let wsApi = null;
+  try { wsApi = await import('../src/workspace-api.js'); } catch (e) { console.error('subpath import threw:', e); }
+  check('SA5 the workspace subpath exposes the provider surface',
+    !!wsApi
+    && typeof wsApi.WorkspaceAdapter === 'function'
+    && typeof wsApi.LocalDirectoryWorkspace === 'function'
+    && typeof wsApi.OPFSWorkspace === 'function'
+    && typeof wsApi.normalizeWorkspacePath === 'function'
+    && typeof wsApi.ensureWorkspacePermission === 'function'
+    && typeof wsApi.vfsError === 'function',
+    errText(wsApi ? '' : 'subpath import threw'));
+  check('SA5b the subpath re-exports the SAME implementation objects (no copy)',
+    !!wsApi
+    && wsApi.WorkspaceAdapter === wsImpl.WorkspaceAdapter
+    && wsApi.LocalDirectoryWorkspace === wsImpl.LocalDirectoryWorkspace
+    && wsApi.OPFSWorkspace === wsImpl.OPFSWorkspace
+    && wsApi.normalizeWorkspacePath === wsImpl.normalizeWorkspacePath
+    && wsApi.ensureWorkspacePermission === wsImpl.ensureWorkspacePermission
+    && wsApi.vfsError === vfsImpl.vfsError,
+    'identity mismatch against src/workspace.js / src/vfs.js');
+  const globalsAfterSubpath = Object.getOwnPropertyNames(globalThis)
+    .filter((k) => !beforeGlobals.has(k) && k !== 'document');
+  check('SA5c the subpath import stays pure (zero globals, zero DOM)',
+    globalsAfterSubpath.length === 0 && domTouched === 0,
+    JSON.stringify({ globals: globalsAfterSubpath, dom: domTouched }));
+  check('SA5d the subpath surfaces the shared escape rules immediately',
+    !!wsApi
+    && (() => {
+      try { wsApi.normalizeWorkspacePath('../escape'); return false; } catch (e) { return /path escapes workspace/.test(e.message); }
+    })()
+    && (() => {
+      try { wsApi.normalizeWorkspacePath('C:/win'); return false; } catch (e) { return /invalid path/.test(e.message); }
+    })(), '');
+}
+
 delete globalThis.document;
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed ? 1 : 0);
