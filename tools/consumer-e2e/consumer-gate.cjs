@@ -1,4 +1,5 @@
-// Out-of-repo consumer gate (M3a; review round 1): installs ONLY the packed
+// Out-of-repo consumer gate (M3a; review round 1; round 2 strengthened
+// the mid-flight lifecycle assertions): installs ONLY the packed
 // tarball, builds this project with its own vite, serves dist/, drives a
 // real headless Chrome through the public package exports, and checks:
 //   C0  the bundle carries no file:/absolute/sibling-source references, and
@@ -7,16 +8,19 @@
 //   C1  VFS shell write/read through the public session
 //   C4a pre-aborted signal refuses; F2 mid-flight gates over a PARKED
 //       provider write with explicit entered/release barriers:
-//         C4b reset boundary (busy TRUE until release, dispatched write
-//             commits, the crossed run reports the boundary, session stays
-//             usable)
-//         C4e mid-flight CALLER abort (unsettled before release, committed
-//             write kept, second write never dispatched, cancellation-
-//             shaped honest failure, NOT reported as a session boundary,
+//         C4b reset boundary (busy TRUE across a scheduling turn until
+//             release, nothing commits/dispatches after the boundary
+//             before release, dispatched write commits, the crossed run
+//             reports the boundary, session stays usable)
+//         C4e mid-flight CALLER abort (unsettled + busy=1 observed
+//             across a scheduling turn BEFORE release, committed write
+//             kept, second write never dispatched, cancellation-shaped
+//             honest failure, NOT reported as a session boundary,
 //             session reusable)
-//         C4f mid-flight dispose (busy stays true, terminal refusal for
-//             execute AND prepare, idempotent dispose keeps the first
-//             reason)
+//         C4f mid-flight dispose (busy stays true across a scheduling
+//             turn, terminal refusal for execute AND prepare, and after
+//             a SECOND dispose FRESH execute/prepare calls still refuse
+//             with the FIRST reason — never the second call's)
 //         C4g the LAST side effect parks and a caller abort lands in the
 //             dispatched-but-unsettled window: the run FAILS even though
 //             the underlying write commits (result classification), with
@@ -46,6 +50,10 @@
 //       shared normalization and classifies NotFoundError
 //   C8  no unhandled page errors
 // The gate never touches the locus-runtime checkout or any sibling source.
+// REVIEW ROUND 2: the C4b/C4e/C4f check bodies live in
+// ./lifecycle-contract.cjs — the SAME module selfcheck-faults.cjs uses to
+// prove the assertions catch the review's fault injections, so the gate
+// and the self-verification cannot drift apart.
 const fs = require('fs/promises');
 const http = require('http');
 const path = require('path');
@@ -55,6 +63,7 @@ const {
   allocateFreePort, closeChrome, connectToTarget, launchChrome, waitForCdp,
   waitForPageTarget, waitForRuntimeCondition,
 } = require('./chrome-driver.cjs');
+const contract = require('./lifecycle-contract.cjs');
 
 const ROOT = __dirname;
 
@@ -278,58 +287,26 @@ async function main() {
       check('C4a pre-aborted execute refuses cancellation-shaped', r.refused === true && r.name === 'AbortError', JSON.stringify(r));
     }
 
-    // C4b reset boundary over a parked write (F2-strengthened: explicit
-    // pre-release unsettled/busy assertions before the honest report)
+    // C4b reset boundary over a parked write (round 2: the pre-release
+    // observations are read AFTER a scheduling turn — the check bodies
+    // come from the shared lifecycle-contract module)
     {
       const r = await evaluate(cdp, 'window.__consumer.scenarioResetBoundary()');
-      check('C4b-i the parked composite is unsettled with busy=1 before the boundary',
-        r && r.busyAtPark === 1 && r.settledAtPark === false && r.busyAfterReset === 1,
-        JSON.stringify({ busyAtPark: r && r.busyAtPark, settled: r && r.settledAtPark, busyAfterReset: r && r.busyAfterReset }));
-      check('C4b-ii the dispatched write commits (no rollback), the crossed run reports the boundary',
-        r && r.committedFirst === true && r.dispatchedSecond === false
-        && r.res.ok === false && /consumer boundary/.test(String(r.res.boundary || '') + String(r.res.output || '')),
-        JSON.stringify({ res: r && r.res, committedFirst: r && r.committedFirst, dispatchedSecond: r && r.dispatchedSecond }));
-      check('C4b-iii busy drains to zero only after true settlement; the session stays usable',
-        r && r.busyFinal === 0 && r.after && r.after.ok === true && r.after.output === 'still-usable',
-        JSON.stringify({ busyFinal: r && r.busyFinal, after: r && r.after }));
+      for (const c of contract.resetChecks(r)) check(c.name, c.cond, c.detail);
     }
 
-    // C4e mid-flight CALLER abort over the parked write (F2)
+    // C4e mid-flight CALLER abort over the parked write (round 2:
+    // settled/busy asserted across a scheduling turn, BEFORE release)
     {
       const r = await evaluate(cdp, 'window.__consumer.scenarioMidFlightAbort()');
-      check('C4e-i the run stays unsettled with busy=1 across the abort (abort does not settle early)',
-        r && r.busyAtPark === 1 && r.settledAtPark === false && r.busyAfterAbort === 1,
-        JSON.stringify({ busyAtPark: r && r.busyAtPark, settled: r && r.settledAtPark, busyAfterAbort: r && r.busyAfterAbort }));
-      check('C4e-ii the dispatched write commits, the second write never dispatches',
-        r && r.committedFirst === true && r.dispatchedSecond === false,
-        JSON.stringify({ committedFirst: r && r.committedFirst, dispatchedSecond: r && r.dispatchedSecond, log: r && r.log }));
-      check('C4e-iii the result fails cancellation-shaped and is NOT reported as a session boundary',
-        r && r.res && r.res.ok === false && /cancelled/i.test(String(r.res.output || '')) && r.res.boundary === undefined,
-        JSON.stringify(r && r.res));
-      check('C4e-iv busy drains to zero; the same session still executes normally',
-        r && r.busyFinal === 0 && r.after && r.after.ok === true && r.after.output === 'still-usable',
-        JSON.stringify({ busyFinal: r && r.busyFinal, after: r && r.after }));
+      for (const c of contract.abortChecks(r)) check(c.name, c.cond, c.detail);
     }
 
-    // C4f mid-flight dispose over the parked write (F2)
+    // C4f mid-flight dispose over the parked write (round 2: scheduling
+    // turn + FRESH rejections re-queried AFTER the second dispose)
     {
       const r = await evaluate(cdp, 'window.__consumer.scenarioMidFlightDispose()');
-      check('C4f-i busy stays TRUE across dispose until the parked op truly settles',
-        r && r.busyAtPark === 1 && r.busyAfterDispose === 1 && r.busyFinal === 0,
-        JSON.stringify({ busyAtPark: r && r.busyAtPark, busyAfterDispose: r && r.busyAfterDispose, busyFinal: r && r.busyFinal }));
-      check('C4f-ii the settled write is kept; zero dispatches after the boundary',
-        r && r.committedFirst === true && r.dispatchedSecond === false,
-        JSON.stringify({ committedFirst: r && r.committedFirst, dispatchedSecond: r && r.dispatchedSecond }));
-      check('C4f-iii the run fails with the disposal boundary named',
-        r && r.res && r.res.ok === false && r.res.isError === true
-        && /consumer mid-flight dispose/.test(String(r.res.boundary || '') + String(r.res.output || '')),
-        JSON.stringify(r && r.res));
-      check('C4f-iv execute AND prepare refuse forever with the same first reason; dispose is idempotent',
-        r && /consumer mid-flight dispose/.test(String(r.executeRejection || ''))
-        && /consumer mid-flight dispose/.test(String(r.prepareRejection || ''))
-        && r.secondDisposeError === null
-        && !/second dispose call/.test(String(r.executeRejection || '') + String(r.prepareRejection || '')),
-        JSON.stringify({ executeRejection: r && r.executeRejection, prepareRejection: r && r.prepareRejection, secondDisposeError: r && r.secondDisposeError }));
+      for (const c of contract.disposeChecks(r)) check(c.name, c.cond, c.detail);
     }
 
     // C4g the LAST side effect parks + caller abort in the unsettled window

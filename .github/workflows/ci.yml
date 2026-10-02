@@ -76,6 +76,10 @@ jobs:
           cp tools/consumer-e2e/package.json "$CONSUMER_DIR/"
           cp tools/consumer-e2e/index.html "$CONSUMER_DIR/"
           cp tools/consumer-e2e/consumer-gate.cjs "$CONSUMER_DIR/"
+          # round 2: the gate's C4b/C4e/C4f check bodies live in this
+          # shared module (selfcheck-faults.cjs uses the same module; it is
+          # a review-round local proof and is NOT run by CI)
+          cp tools/consumer-e2e/lifecycle-contract.cjs "$CONSUMER_DIR/"
           cp tests/helpers/chrome.cjs "$CONSUMER_DIR/chrome-driver.cjs"
           echo "CONSUMER_DIR=$CONSUMER_DIR" >> "$GITHUB_ENV"
           echo "consumer assembled at: $CONSUMER_DIR"

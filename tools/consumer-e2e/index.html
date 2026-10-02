@@ -6,7 +6,9 @@
 </head>
 <body>
 <!--
-  MINIMAL OUT-OF-REPO CONSUMER (M3a exit gate; review round 1).
+  MINIMAL OUT-OF-REPO CONSUMER (M3a exit gate; review round 1; round 2
+  strengthened the mid-flight observation timing and added the dispose
+  re-query + the fault-injection self-verification entry).
 
   This page lives in its own directory outside the locus-runtime checkout.
   It imports ONLY the package's public exports ('locus-runtime',
@@ -25,6 +27,10 @@
     (provider entered the park), `release()` decides when it settles,
     `log` records every transition. No fixed sleeps: ordering is proven
     by these barriers (F2/C4).
+  - schedulingTurnBarrier (review round 2): one MessageChannel macrotask
+    awaited between a lifecycle boundary and the pre-release reads, so
+    boundary-scheduled promise/microtask reactions have run while the
+    provider release stays closed.
   - scenario helpers (f1LocalDirectory / f1Opfs / f1CustomProvider) that
     return structured results for the gate to assert on (F1/C9). Each
     holds its own session/vfs and cleans up in finally.
@@ -65,6 +71,22 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
+// ---- one explicit SCHEDULING TURN (review round 2, gap A): a
+// MessageChannel macrotask. When this resolves, every promise reaction
+// and queueMicrotask callback the boundary could have scheduled HAS RUN,
+// while the provider's release is still closed (the write is still
+// parked). Replaces the round-1 same-stack reads, which could never see
+// an implementation that releases busy or settles the run one microtask
+// after the boundary. Not a sleep: the turn is deterministic; the
+// labeled timeout only guards a broken channel.
+function schedulingTurnBarrier() {
+  return new Promise((resolve) => {
+    const ch = new MessageChannel();
+    ch.port1.onmessage = () => { ch.port1.close(); ch.port2.close(); resolve(); };
+    ch.port2.postMessage(null);
+  });
+}
+
 const errors = [];
 window.addEventListener('error', (e) => errors.push(String(e.message || e)));
 window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejection: ' + String(e.reason && e.reason.message || e.reason)));
@@ -85,13 +107,112 @@ window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejec
   }
   const vfs = makeVfs();
 
+  // ================================================================
+  // REVIEW ROUND 2 — FAULT-INJECTION SELF-VERIFICATION WRAPPERS.
+  // NOT part of the normal consumer gate: these wrap ONLY the public
+  // session surface, exist ONLY for selfcheck-faults.cjs, and the gate
+  // never constructs them. No product switch, no internal test entry,
+  // no copied execution algorithm — each wrapper stands in for a
+  // HYPOTHETICAL broken implementation to prove the strengthened
+  // assertions catch it (and that the round-1 assertions did not).
+  //   'early-busy-release' (fault A1) — one microtask after the caller's
+  //     abort, the public status misreports busyExecutions as 0 while the
+  //     real execution is still parked at the provider barrier.
+  //   'early-settle' (fault A2) — one microtask after the caller's abort,
+  //     the caller-visible promise resolves (cancellation-shaped) while
+  //     the real provider write is still parked. status() stays honest.
+  //   'dispose-reason-override' (fault B) — after the SECOND dispose
+  //     call, fresh execute/prepare refusals are overridden with the
+  //     second reason (a hypothetical reason clobber).
+  // ================================================================
+  // The fault B override reason, kept next to its wrapper (the
+  // self-check asserts the FRESH rejections carry it).
+  const SECOND_DISPOSE_FAULT_REASON = 'second dispose call (fault: reason override)';
+  function wrapSessionFault(s, kind) {
+    if (kind === 'early-busy-release') {
+      let misreport = false;
+      return {
+        status() {
+          const snap = s.status();
+          return misreport ? Object.assign({}, snap, { busyExecutions: 0 }) : snap;
+        },
+        execute(req) {
+          const signal = req && req.context && req.context.signal;
+          if (signal) {
+            signal.addEventListener('abort', () => { queueMicrotask(() => { misreport = true; }); }, { once: true });
+          }
+          return s.execute(req);
+        },
+        prepare(req) { return s.prepare(req); },
+        dispose(reason) { return s.dispose(reason); },
+      };
+    }
+    if (kind === 'early-settle') {
+      return {
+        status() { return s.status(); },
+        execute(req) {
+          const signal = req && req.context && req.context.signal;
+          const real = s.execute(req);
+          if (!signal) return real;
+          return new Promise((resolve) => {
+            const onAbort = () => {
+              // THE FAULT: settled one microtask after the abort, while
+              // the real provider write is still parked. The real run's
+              // own late settlement is handled here and ignored.
+              queueMicrotask(() => resolve({
+                ok: false, isError: true, output: 'bash: cancelled by caller',
+              }));
+            };
+            if (signal.aborted) onAbort();
+            else signal.addEventListener('abort', onAbort, { once: true });
+            real.then(resolve, () => {});
+          });
+        },
+        prepare(req) { return s.prepare(req); },
+        dispose(reason) { return s.dispose(reason); },
+      };
+    }
+    if (kind === 'dispose-reason-override') {
+      let secondDisposeHappened = false;
+      const override = () => new Error('runtime session disposed: ' + SECOND_DISPOSE_FAULT_REASON);
+      // The disposed session surfaces its refusal as a REJECTED PROMISE
+      // (async execute / Promise.reject prepare), so the override hooks
+      // the rejection, not a synchronous throw.
+      const refuse = (attempt) => {
+        let real;
+        try { real = attempt(); } catch (e) { real = Promise.reject(e); }
+        return secondDisposeHappened
+          ? real.then((v) => v, (e) => { throw override(e); })
+          : real;
+      };
+      return {
+        status() { return s.status(); },
+        execute(req) {
+          return refuse(() => s.execute(req));
+        },
+        prepare(req) {
+          return refuse(() => s.prepare(req));
+        },
+        dispose(reason) {
+          if (String(reason) === 'second dispose call') secondDisposeHappened = true;
+          return s.dispose(reason);
+        },
+      };
+    }
+    throw new Error('unknown fault kind: ' + String(kind));
+  }
+
   // F2/C4 probe: a dedicated session whose provider write parks on a
   // gated path. `entered` is an explicit Promise (the write IS dispatched
   // and parked); `release()` decides when it settles; `log` records every
   // transition. No timers — the gate awaits the barriers.
-  function makeParkingVfs() {
+  // `faultKind` (review round 2) is SELF-VERIFICATION ONLY: the normal
+  // gate never passes it, so the gate always drives the real
+  // implementation unwrapped.
+  function makeParkingVfs(faultKind) {
     const inner = makeVfs();
-    const s = host.createSession();
+    let s = host.createSession();
+    if (faultKind) s = wrapSessionFault(s, faultKind);
     const p = {
       session: s, vfs: inner, log: [], parkedPath: null,
       entered: null, release: () => {},
@@ -402,8 +523,12 @@ window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejec
 
   // Composite shell whose FIRST write parks; a CALLER abort lands while it
   // is dispatched-but-unsettled; the second write must never dispatch.
-  async function scenarioMidFlightAbort() {
-    const p = makeParkingVfs();
+  // Review round 2: the boundary is followed by an explicit scheduling
+  // turn, and the pre-release state is read AFTER it — settled/busy/
+  // commit/dispatch facts can no longer hide behind a same-stack read.
+  async function scenarioMidFlightAbort(opts) {
+    const o = opts || {};
+    const p = makeParkingVfs(o.fault);
     const ac = new AbortController();
     try {
       p.hold('/mnt/workspace/first.txt');
@@ -412,12 +537,24 @@ window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejec
       const busyAtPark = p.session.status().busyExecutions;
       const settledAtPark = p.settled;
       ac.abort();
-      const busyAfterAbort = p.session.status().busyExecutions;
+      // The ROUND-1 observation (same-stack read, no scheduling turn) —
+      // recorded ONLY for the fault-injection contrast; C4e-i now
+      // asserts the barrier-backed observation below.
+      const busyAfterBoundarySync = p.session.status().busyExecutions;
+      await withTimeout(schedulingTurnBarrier(), 5000, 'mid-abort: the scheduling-turn barrier never fired');
+      // PRE-RELEASE observation (review round 2): every microtask the
+      // abort could have scheduled has run; release is still closed.
+      const settledBeforeRelease = p.settled;
+      const busyBeforeRelease = p.session.status().busyExecutions;
+      const parkedWriteCommittedBeforeRelease = p.log.some((l) => l.startsWith('write:commit:/mnt/workspace/first.txt'));
+      const secondWriteDispatchedBeforeRelease = p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/second.txt'));
       p.release();
       const res = await withTimeout(p.execPromise, 5000, 'mid-abort: execute did not settle after release');
       const after = await p.session.execute({ kind: 'shell', input: 'echo still-usable', context: { filesystem: p.vfs } });
       return {
-        busyAtPark, settledAtPark, busyAfterAbort,
+        busyAtPark, settledAtPark, busyAfterBoundarySync,
+        settledBeforeRelease, busyBeforeRelease,
+        parkedWriteCommittedBeforeRelease, secondWriteDispatchedBeforeRelease,
         res: { ok: res.ok, isError: !!res.isError, output: res.output, boundary: res.boundary },
         busyFinal: p.session.status().busyExecutions,
         committedFirst: await p.vfs.exists('/mnt/workspace/first.txt'),
@@ -432,15 +569,25 @@ window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejec
   // dispatched-but-unsettled: the busy count stays TRUE until release,
   // the settled write is kept, nothing dispatches after, and the session
   // refuses execute AND prepare forever with the same first reason.
-  async function scenarioMidFlightDispose() {
-    const p = makeParkingVfs();
+  // Review round 2: scheduling-turn barrier + pre-release observation
+  // (gap A), and the SECOND dispose is followed by FRESH execute/prepare
+  // calls whose rejections are observed anew — never the cached
+  // first-round reasons (gap B).
+  async function scenarioMidFlightDispose(opts) {
+    const o = opts || {};
+    const p = makeParkingVfs(o.fault);
     try {
       p.hold('/mnt/workspace/d1.txt');
       p.exec('echo d1 > /mnt/workspace/d1.txt && echo d2 > /mnt/workspace/d2.txt');
       await withTimeout(p.entered, 5000, 'mid-dispose: the first write never reached the provider park');
       const busyAtPark = p.session.status().busyExecutions;
       p.session.dispose('consumer mid-flight dispose');
-      const busyAfterDispose = p.session.status().busyExecutions;
+      const busyAfterBoundarySync = p.session.status().busyExecutions;
+      await withTimeout(schedulingTurnBarrier(), 5000, 'mid-dispose: the scheduling-turn barrier never fired');
+      const settledBeforeRelease = p.settled;
+      const busyBeforeRelease = p.session.status().busyExecutions;
+      const parkedWriteCommittedBeforeRelease = p.log.some((l) => l.startsWith('write:commit:/mnt/workspace/d1.txt'));
+      const secondWriteDispatchedBeforeRelease = p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/d2.txt'));
       p.release();
       const res = await withTimeout(p.execPromise, 5000, 'mid-dispose: execute did not settle after release');
       let executeRejection = null;
@@ -449,24 +596,42 @@ window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejec
       let prepareRejection = null;
       try { await p.session.prepare({}); }
       catch (e) { prepareRejection = String(e && e.message || e); }
+      const logLengthBeforeSecondDispose = p.log.length;
+      // SECOND dispose (review round 2, gap B): the assertions below
+      // must observe what happens AFTER this call, not reuse the cached
+      // rejections captured above.
       let secondDisposeError = null;
       try { p.session.dispose('second dispose call'); } catch (e) { secondDisposeError = String(e && e.message || e); }
+      let executeRejection2 = null;
+      try { await p.session.execute({ kind: 'shell', input: 'echo nope-again', context: { filesystem: p.vfs } }); }
+      catch (e) { executeRejection2 = String(e && e.message || e); }
+      let prepareRejection2 = null;
+      try { await p.session.prepare({}); }
+      catch (e) { prepareRejection2 = String(e && e.message || e); }
       return {
-        busyAtPark, busyAfterDispose,
+        busyAtPark, busyAfterBoundarySync,
+        settledBeforeRelease, busyBeforeRelease,
+        parkedWriteCommittedBeforeRelease, secondWriteDispatchedBeforeRelease,
         res: { ok: res.ok, isError: !!res.isError, output: res.output, boundary: res.boundary },
         busyFinal: p.session.status().busyExecutions,
         committedFirst: await p.vfs.exists('/mnt/workspace/d1.txt'),
         dispatchedSecond: p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/d2.txt')),
-        executeRejection, prepareRejection, secondDisposeError,
+        executeRejection, prepareRejection,
+        secondDisposeError, executeRejection2, prepareRejection2,
+        busyAfterSecondDispose: p.session.status().busyExecutions,
+        dispatchesAfterSecondDispose: p.log.slice(logLengthBeforeSecondDispose)
+          .filter((l) => l.startsWith('write:enter:')).length,
         log: p.log,
       };
     } finally { p.cleanup(); }
   }
 
-  // The strengthened reset boundary: explicit pre-release unsettled/busy
-  // assertions, then the honest boundary report and a reusable session.
-  async function scenarioResetBoundary() {
-    const p = makeParkingVfs();
+  // The strengthened reset boundary (review round 2): explicit
+  // pre-release unsettled/busy assertions observed ACROSS A SCHEDULING
+  // TURN, then the honest boundary report and a reusable session.
+  async function scenarioResetBoundary(opts) {
+    const o = opts || {};
+    const p = makeParkingVfs(o.fault);
     try {
       p.hold('/mnt/workspace/first.txt');
       p.exec('echo first > /mnt/workspace/first.txt && echo second > /mnt/workspace/second.txt');
@@ -474,12 +639,19 @@ window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejec
       const busyAtPark = p.session.status().busyExecutions;
       const settledAtPark = p.settled;
       p.session.reset('consumer boundary');
-      const busyAfterReset = p.session.status().busyExecutions;
+      const busyAfterBoundarySync = p.session.status().busyExecutions;
+      await withTimeout(schedulingTurnBarrier(), 5000, 'reset: the scheduling-turn barrier never fired');
+      const settledBeforeRelease = p.settled;
+      const busyBeforeRelease = p.session.status().busyExecutions;
+      const parkedWriteCommittedBeforeRelease = p.log.some((l) => l.startsWith('write:commit:/mnt/workspace/first.txt'));
+      const secondWriteDispatchedBeforeRelease = p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/second.txt'));
       p.release();
       const res = await withTimeout(p.execPromise, 5000, 'reset: execute did not settle after release');
       const after = await p.session.execute({ kind: 'shell', input: 'echo still-usable', context: { filesystem: p.vfs } });
       return {
-        busyAtPark, settledAtPark, busyAfterReset,
+        busyAtPark, settledAtPark, busyAfterBoundarySync,
+        settledBeforeRelease, busyBeforeRelease,
+        parkedWriteCommittedBeforeRelease, secondWriteDispatchedBeforeRelease,
         res: { ok: res.ok, isError: !!res.isError, output: res.output, boundary: res.boundary },
         busyFinal: p.session.status().busyExecutions,
         committedFirst: await p.vfs.exists('/mnt/workspace/first.txt'),
@@ -516,6 +688,15 @@ window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejec
     exec, runPython, errors, statusEvents, net,
     importWorkspaceSubpath, f1LocalDirectory, f1Opfs, f1CustomProvider,
     scenarioMidFlightAbort, scenarioMidFlightDispose, scenarioResetBoundary, scenarioLastWrite,
+    // Review round 2: fault-injection SELF-VERIFICATION entry — invoked
+    // ONLY by selfcheck-faults.cjs; the normal consumer gate never calls
+    // it. selfcheck(null, name) is the no-fault control (the real
+    // implementation); a fault name wraps the session for that one run.
+    selfcheck: (fault, scenarioName) => {
+      const fn = { abort: scenarioMidFlightAbort, dispose: scenarioMidFlightDispose, reset: scenarioResetBoundary }[scenarioName];
+      if (!fn) throw new Error('unknown scenario: ' + String(scenarioName));
+      return fn(fault ? { fault } : undefined);
+    },
     withTimeout,
     capabilities: () => host.capabilities(),
     describeCommands: () => session.describeCommands(),
