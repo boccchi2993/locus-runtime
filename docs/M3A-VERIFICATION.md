@@ -1,12 +1,15 @@
 # M3a verification record — Runtime repository extraction
 
-Status: M3a deliverable + review round 1. Extraction candidate branch
-`refactor/extract-runtime` @ `0129c55` (§1–§6 record the extraction-round
-evidence: commits `5918fe8` + `0129c55` over the minimal `main` @ `5bedeeb`).
-§7 records REVIEW ROUND 1 (the public-provider-subpath, consumer-lifecycle
-and network-dispatch-oracle round) — its evidence covers this round's own
-commits on top. Source baseline:
-`boccchi2993/Locus-browser-agent-runtime` @ `2aec76e78431382873be1db8a6db6310cc89c782`
+Status: M3a deliverable + review round 1 + review round 2. Extraction
+candidate branch `refactor/extract-runtime` @ `0129c55` (§1–§6 record the
+extraction-round evidence: commits `5918fe8` + `0129c55` over the minimal
+`main` @ `5bedeeb`). §7 records REVIEW ROUND 1 (the public-provider-subpath,
+consumer-lifecycle and network-dispatch-oracle round) — its evidence covers
+this round's own commits on top. §8 records REVIEW ROUND 2 (mid-flight
+observation timing, dispose re-query, fault-injection self-verification)
+over the round baseline `9863607b79b32cc209847430244c70036ab3665a`. Source
+baseline: `boccchi2993/Locus-browser-agent-runtime` @
+`2aec76e78431382873be1db8a6db6310cc89c782`
 (branch `refactor/repository-split-m2c`, head of OPEN PR #7, base
 `refactor/repository-split-m2b` — verified via the GitHub API at extraction
 start; no product branch rewritten, no PR merged). Companion documents:
@@ -313,3 +316,162 @@ surface.
   is never really fetched (recorder + stub answer deterministically). REAL
   network in this round's runs: only the pre-existing consumer Python
   bootstrap download from the pinned jsDelivr CDN (recorded, as before).
+
+## 8. Review round 2 — mid-flight observation timing, dispose re-query, fault-injection self-verification
+
+Scope of the round: exactly the two review findings on the consumer gate's
+ASSERTION POWER (gap A: boundary-window observations were read too early;
+gap B: the second dispose's effect on refusal reasons was never
+re-queried). **The Runtime implementation modules were NOT changed** —
+`git diff 9863607b79b32cc209847430244c70036ab3665a..HEAD -- src/` is empty
+(re-verified after the round's commits), and no RuntimeSession lifecycle
+defect was found or is claimed fixed: the known problems were test
+observation timing, and the real implementation passes all strengthened
+checks. Round baseline: head `9863607b79b32cc209847430244c70036ab3665a`
+of OPEN PR #1 (base `main` @ `5bedeeb`, state verified via the GitHub API
+at round start); the round appends two commits — no history rewrite, no
+merge, no touching of the source Locus repository or any product
+worktree. Working checkout: `C:/Users/hua/Desktop/文档/Locus-runtime-m3a`;
+consumer assembly: `C:/Users/hua/Desktop/文档/Locus-runtime-consumer-m3a-r2`
+(a directory OUTSIDE the checkout, fresh for this round).
+
+### 8.1 The two blind spots (both test-side)
+
+1. **Gap A — boundary-window observations happened too early.** All three
+   mid-flight scenarios (C4b reset, C4e caller abort, C4f dispose) read
+   the post-boundary state SYNCHRONOUSLY in the same call stack as the
+   boundary call (`busyAfterAbort`-style reads) and read `settled` only
+   BEFORE the boundary. An implementation that released the busy seat or
+   settled the run one MICROTASK after the boundary would have passed
+   every round-1 check. The review demonstrated this with a controlled
+   fault injection: public `status()` misreporting `busyExecutions: 0`
+   one microtask after the caller abort — all round-1 C4e observations
+   stayed green.
+2. **Gap B — the second dispose was never re-queried.** Round-1 C4f-iv
+   captured `executeRejection`/`prepareRejection` AFTER the FIRST dispose
+   but BEFORE `dispose('second dispose call')`, then asserted "the first
+   reason is kept" from those CACHED values. A second dispose that
+   clobbered subsequent refusal reasons would have been invisible.
+
+### 8.2 The fix — assertion timing and location (test code only)
+
+- `tools/consumer-e2e/index.html` gains `schedulingTurnBarrier()`: ONE
+  MessageChannel macrotask awaited between the boundary and the
+  pre-release reads (both ports closed on resolve; the labeled 5 s
+  timeout guards a broken channel only — it is not a timing assumption).
+  When it resolves, every promise reaction and queueMicrotask the
+  boundary could have scheduled HAS RUN while the provider release stays
+  closed. No fixed sleep anywhere.
+- All three scenarios now observe, in order: `entered` → pre-boundary
+  state → boundary → same-stack read (`busyAfterBoundarySync`, kept ONLY
+  as the recorded round-1 contrast — no check is load-bearing on it) →
+  scheduling turn → PRE-RELEASE state (`settledBeforeRelease`,
+  `busyBeforeRelease`, `parkedWriteCommittedBeforeRelease`,
+  `secondWriteDispatchedBeforeRelease`) → `release()` → true settlement →
+  finals. Every wait keeps its labeled timeout; cleanup stays in
+  `finally` (settle the park, retire the session).
+- `scenarioMidFlightDispose` additionally performs the SECOND dispose and
+  then FRESH `execute`/`prepare` calls, recording
+  `executeRejection2`/`prepareRejection2`/`secondDisposeError`/
+  `busyAfterSecondDispose`/`dispatchesAfterSecondDispose`. The cached
+  first-dispose rejections are still recorded (honest observations of the
+  FIRST dispose) but no longer carry the "forever/idempotent" claim.
+- The C4b/C4e/C4f check bodies moved into the NEW shared module
+  `tools/consumer-e2e/lifecycle-contract.cjs`, used by BOTH the gate and
+  the self-verification — one source of truth, the two cannot drift.
+  Strengthened checks: C4b-i/C4e-i assert `settledBeforeRelease === false`
+  and `busyBeforeRelease === 1` ACROSS the scheduling turn, BEFORE
+  release; C4b-ii/C4e-ii/C4f-ii additionally assert nothing commits and
+  nothing else dispatches between boundary and release (then the honest
+  finals after release); C4f-v is NEW (after the second dispose, FRESH
+  rejections keep the FIRST reason, never 'second dispose call'; the
+  second dispose does not throw; busy stays 0; nothing new dispatches).
+  C4e-iii/C4e-iv/C4b-iii/C4f-iii keep their round-1 bodies; C4f-iv is
+  narrowed to its honest claim (the FIRST dispose's refusals).
+- CI: the consumer job copies `lifecycle-contract.cjs` into the
+  RUNNER_TEMP consumer directory (it is now necessary gate
+  infrastructure). Everything else in the job is unchanged — the consumer
+  is still assembled under `${{ runner.temp }}` and installs ONLY the
+  tarball + its own vite.
+
+### 8.3 The proof — controlled fault injection (test wrappers only)
+
+`tools/consumer-e2e/selfcheck-faults.cjs` runs in the SAME assembled
+consumer directory, same tarball, same built page as the normal gate. The
+only extra piece is the page-side `wrapSessionFault` (index.html,
+self-verification section): it wraps ONLY the public session surface for
+one scenario run — no product switch, no internal test entry, no copied
+execution algorithm — and the normal gate never constructs a wrapper.
+Each proof asserts three things: the OLD judgment set stays green under
+the fault (the old gate was blind), the fault is really visible to the
+new observation, and the STRENGTHENED set fails exactly at the designated
+check. A no-fault CONTROL (both scenarios) shows the REAL implementation
+passing BOTH judgment sets in the same harness.
+
+| Proof | Fault (wrapper behavior) | Old (round-1) judgment set | New (round-2) judgment set |
+|---|---|---|---|
+| A1 early busy-release | one microtask after the caller abort, public `status()` misreports `busyExecutions: 0`; the real execution keeps waiting at the provider barrier | ALL GREEN — the old gate could not see it | C4e-i FAILS (`busyBeforeRelease === 0`); every other check stays green (surgical) |
+| A2 early settle | one microtask after the caller abort, the caller-visible promise resolves cancellation-shaped while the real write stays parked; `status()` stays honest | the same-stack C4e-i entry stays green (later legacy finals are RECORDED but not required — the real run settles concurrently with the probe) | C4e-i FAILS on `settledBeforeRelease === true` with `busyBeforeRelease === 1` — the settled assertion has teeth beyond the busy one |
+| B dispose reason override | after the SECOND dispose call, fresh execute/prepare refusals are overridden with the second reason | ALL GREEN — the cached rejections predate the second dispose | C4f-v FAILS (fresh rejections carry the second reason); every other check stays green (surgical) |
+
+Result on the final code (headless Chrome, full log
+`selfcheck-results.log` in the consumer directory): **16/16 PASS** —
+4 CONTROL, 4 A1, 3 A2 (+1 recorded note line), 4 B, 1 hygiene (zero
+unhandled page errors across control + fault runs). One defect in the
+SELF-CHECK HARNESS itself was found and fixed during the round: the first
+fault-B wrapper hooked a synchronous throw, but the disposed session
+surfaces its refusal as a REJECTED promise, so the override never fired
+and the first B run honestly showed the fault NOT taking effect; the
+wrapper now hooks the rejection. The faults prove the OLD assertions
+blind — they are NOT evidence of a Runtime defect (see the CONTROL line
+and the normal gate below).
+
+### 8.4 Gates actually executed this round
+
+| Gate | Result |
+|---|---|
+| `npm run build` + boundary gate + import purity (sanity) | build OK; boundary **22/22**; purity OK |
+| `tests/runtime-session-lifecycle.test.mjs` (existing suite, unchanged) | **91/91** |
+| Out-of-repo consumer gate, round-2 assembly: `npm pack` → fresh consumer directory OUTSIDE the checkout → tarball install → the consumer's OWN vite build → headless Chrome over the public exports | **40/40** (`consumer-gate-results.log`): C0/C0b, C1, C5/C5b, C6a/b/c, C4a, C4b-i…iii, C4e-i…iv, C4f-i…**v**, C4g + control, C2/b (REAL pinned-CDN Python boot), C3, C9a…C9e-ii, C8 — the strengthened C4b/C4e/C4f bodies (from the shared judgment module) execute here against the REAL implementation |
+| Fault-injection self-verification (same consumer directory) | **16/16** (`selfcheck-results.log`) |
+
+Check-count delta 39 → 40 is the new C4f-v; no round-1 check was renamed
+away and no condition dropped — the C4b/C4e/C4f slots kept their names
+with sharper conditions.
+
+### 8.5 Executed this round vs. carried forward
+
+- Actually executed this round: everything in §8.4 (plus the round's own
+  first B run that exposed the harness defect, §8.3).
+- NOT re-run locally (the implementation modules are byte-identical to
+  the round baseline; rationale as in §7.3): the other seven browser
+  suites and the unit suites beyond the lifecycle one. CI re-runs the
+  full set on the pushed head.
+- The historical **python-authority E3 SystemError** question stays OPEN
+  and untouched (§3; root cause NOT confirmed — unchanged). This round's
+  subject is test assertion power; its green runs say nothing about E3
+  and must not be read as its resolution.
+
+### 8.6 Unverified scope / honest boundary of this round
+
+- The fault wrappers ran only in this round's local self-verification; CI
+  runs the normal gate (with the shared judgment module copied into the
+  consumer) but does NOT execute the self-check. The self-check is
+  reproducible from the pushed tree: assemble a consumer directory (as
+  the CI job does), then `node selfcheck-faults.cjs`.
+- The self-check's A2 proof requires only the same-stack legacy entry to
+  stay green; the remaining legacy entries are recorded without a
+  pass/fail requirement (their outcome depends on how the real run's
+  concurrent settlement interleaves with the probe — at best the old gate
+  saw a LATE busy anomaly there, never the boundary-window settlement).
+- Consumer isolation properties are unchanged from round 1 (§7.6/§7.7):
+  assembly under RUNNER_TEMP, tarball-only install, C0/C0b oracle. This
+  round's local consumer run is a sibling directory, as before; CI on the
+  pushed head is the ubuntu-latest evidence for the updated job.
+- No model, paid API or real relay is contacted. REAL network this round:
+  only the consumer gate's pre-existing Python bootstrap download from
+  the pinned jsDelivr CDN (recorded, as before). The self-check downloads
+  nothing (no Python boots; the synthetic network target is never really
+  fetched).
+- Nothing in this round changed `src/`, and nothing in it should be read
+  as a Runtime lifecycle fix; PR #1 remains OPEN, unmerged.

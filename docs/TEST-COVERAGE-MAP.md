@@ -150,3 +150,60 @@ Distinct names for distinct subjects: the historical
 unconfirmed) and this round's **network dispatch-counting task (F3 of review
 round 1)** are UNRELATED. A green dispatch-counting run says nothing about
 the historical exception and does not close it.
+
+## 6. M3a review round 2 — strengthened mid-flight consumer assertions (no check weakened)
+
+The review found two TEST-POWER gaps in the round-1 consumer gate — both on
+the observation side; the Runtime implementation was NOT changed (zero
+`src/` diff against the round baseline `9863607b`; no lifecycle defect
+found or claimed). Evidence and results: M3A-VERIFICATION §8. Names:
+
+- **Gap A (boundary-window observations read too early)** — all three
+  mid-flight scenarios (C4b reset, C4e caller abort, C4f dispose) read the
+  post-boundary state in the SAME call stack as the boundary call and read
+  `settled` only before it, so an implementation that released busy or
+  settled the run one microtask after the boundary passed every round-1
+  check. Fix = timing, in `tools/consumer-e2e/index.html`: an explicit
+  `schedulingTurnBarrier()` (ONE MessageChannel macrotask, both ports
+  closed on resolve, labeled timeout guard) is awaited between the
+  boundary and the pre-release reads. Every scenario now records
+  `settledBeforeRelease` / `busyBeforeRelease` /
+  `parkedWriteCommittedBeforeRelease` / `secondWriteDispatchedBeforeRelease`
+  AFTER the barrier and BEFORE `release()` (the round-1 same-stack read is
+  kept only as the recorded contrast, `busyAfterBoundarySync`). The C4b/
+  C4e/C4f check bodies moved into the shared module
+  `tools/consumer-e2e/lifecycle-contract.cjs` (used by BOTH the gate and
+  the self-verification — one source of truth): C4b-i/C4e-i now assert
+  `settledBeforeRelease === false && busyBeforeRelease === 1` across the
+  turn; C4b-ii/C4e-ii/C4f-ii additionally assert nothing commits and
+  nothing else dispatches between boundary and release.
+- **Gap B (second dispose never re-queried)** — `scenarioMidFlightDispose`
+  now performs `dispose('second dispose call')` and then FRESH
+  `execute`/`prepare` calls; the NEW check C4f-v asserts the fresh
+  rejections keep the FIRST disposal reason (never 'second dispose call'),
+  the second dispose does not throw, busy stays 0 and nothing new
+  dispatches. Round-1 C4f-iv is narrowed to its honest claim (the FIRST
+  dispose's refusals) — its "forever/idempotent" pretension moved into the
+  observed C4f-v.
+- **Fault-injection self-verification** —
+  `tools/consumer-e2e/selfcheck-faults.cjs` (NOT a CI step; review-round
+  local proof, reproducible from the pushed tree) proves the new
+  assertions catch what the old ones missed: A1 (public busy misreported 0
+  one microtask after the caller abort → ALL round-1 checks stay green,
+  strengthened C4e-i fails), A2 (early settlement of the caller-visible
+  promise → strengthened C4e-i fails on `settledBeforeRelease`, so the
+  settled assertion has teeth beyond the busy one), B (post-second-dispose
+  reason override → ALL round-1 checks stay green, C4f-v fails). The fault
+  wrappers wrap only the public session surface, exist only in the
+  self-verification section of the fixture page; the normal gate always
+  drives the real implementation unwrapped, and a no-fault CONTROL run in
+  the same harness passes BOTH judgment sets (16/16 total).
+- CI copies the shared judgment module
+  (`tools/consumer-e2e/lifecycle-contract.cjs`) into the RUNNER_TEMP
+  consumer directory — it is necessary gate infrastructure now; the
+  consumer job's isolation shape is otherwise unchanged.
+
+Check-count effect: consumer gate 39 → 40 (C4f split into the honest
+C4f-iv and the observed C4f-v); no check renamed away and no round-1
+condition dropped — each strengthened check keeps its slot with sharper
+conditions. The in-repo suites are untouched by this round.
