@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'refactor/**']
+  pull_request:
+
+jobs:
+  unit:
+    name: unit tests (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # the unit gate includes the boundary suite, whose G5 section scans the
+      # BUILT bundle — build first (the documented local order is the same:
+      # npm ci && npm run build && npm test)
+      - run: npm run build
+      - run: npm test
+      - name: import purity
+        run: node tools/verify-import-purity.mjs
+
+  build:
+    name: build + package checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: boundary gate over sources + built bundle
+        run: node tests/runtime-boundary.test.cjs
+      - name: pack + content check
+        run: |
+          npm pack
+          CONTENT=$(tar -tzf locus-runtime-*.tgz)
+          echo "$CONTENT"
+          echo "$CONTENT" | grep -q 'package/src/index.js'
+          echo "$CONTENT" | grep -q 'package/src/worker-assets.js'
+          echo "$CONTENT" | grep -q 'package/LICENSE'
+          # nothing outside src/ + LICENSE + README + package.json
+          if echo "$CONTENT" | grep -qv -E '^package/(src/|LICENSE|README\.md|package\.json)'; then
+            echo 'unexpected file in the package'; exit 1
+          fi
+
+  consumer:
+    name: out-of-repo tarball consumer (headless Chrome)
+    runs-on: ubuntu-latest
+    needs: [unit, build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm pack
+      # ISOLATION (review round 1): the consumer is assembled and run in a
+      # directory UNDER RUNNER_TEMP, never inside the checkout — it cannot
+      # fall back to the checkout's node_modules, src or sibling paths. Only
+      # test infrastructure is copied: the fixture page, the generic Chrome
+      # driver, the gate and the tarball. No Runtime implementation file is
+      # a consumer dependency.
+      - name: assemble the consumer OUTSIDE the checkout (RUNNER_TEMP)
+        run: |
+          CONSUMER_DIR="${{ runner.temp }}/locus-consumer-e2e"
+          mkdir -p "$CONSUMER_DIR"
+          cp locus-runtime-*.tgz "$CONSUMER_DIR/locus-runtime.tgz"
+          cp tools/consumer-e2e/package.json "$CONSUMER_DIR/"
+          cp tools/consumer-e2e/index.html "$CONSUMER_DIR/"
+          cp tools/consumer-e2e/consumer-gate.cjs "$CONSUMER_DIR/"
+          # round 2: the gate's C4b/C4e/C4f check bodies live in this
+          # shared module (selfcheck-faults.cjs uses the same module; it is
+          # a review-round local proof and is NOT run by CI)
+          cp tools/consumer-e2e/lifecycle-contract.cjs "$CONSUMER_DIR/"
+          cp tests/helpers/chrome.cjs "$CONSUMER_DIR/chrome-driver.cjs"
+          echo "CONSUMER_DIR=$CONSUMER_DIR" >> "$GITHUB_ENV"
+          echo "consumer assembled at: $CONSUMER_DIR"
+      - name: install (tarball + the consumer's own build tool only)
+        working-directory: ${{ env.CONSUMER_DIR }}
+        run: npm install
+      - name: run the consumer browser gate
+        working-directory: ${{ env.CONSUMER_DIR }}
+        run: |
+          CHROME=$(which google-chrome || which chromium || true)
+          export CHROME
+          node consumer-gate.cjs
+
+  browser:
+    name: browser gates (headless Chrome)
+    runs-on: ubuntu-latest
+    needs: [unit, build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: |
+          CHROME=$(which google-chrome || which chromium || true)
+          export CHROME
+          npm run test:e2e
