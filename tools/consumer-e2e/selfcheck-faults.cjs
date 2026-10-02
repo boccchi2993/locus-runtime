@@ -152,6 +152,15 @@ async function main() {
         legacy.every((c) => c.cond), JSON.stringify(legacy.filter((c) => !c.cond).map((c) => c.name)));
       check('CONTROL ' + scenario + ': the real implementation passes the STRENGTHENED (round-2) judgment set',
         strong.every((c) => c.cond), JSON.stringify(strong.filter((c) => !c.cond).map((c) => c.name)));
+      if (scenario === 'dispose') {
+        // Judgment sensitivity proof only: change ONE observed fact from
+        // the real control, without changing the Runtime or the control.
+        const changed = { ...r, settledBeforeRelease: true };
+        const failures = contract.disposeChecks(changed).filter((c) => !c.cond);
+        check('DISPOSE settlement sensitivity: only C4f-i rejects settledBeforeRelease=true',
+          failures.length === 1 && failures[0].name.startsWith('C4f-i '),
+          JSON.stringify(failures.map((c) => ({ name: c.name, detail: c.detail }))));
+      }
     }
 
     // ---------- the faults ----------

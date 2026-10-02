@@ -150,8 +150,10 @@ function disposeLegacyChecks(r) {
 function disposeChecks(r) {
   return [
     { name: 'C4f-i busy stays TRUE across dispose until the parked op truly settles (observed across a scheduling turn, before release)',
-      cond: !!r && r.busyAtPark === 1 && r.busyBeforeRelease === 1 && r.busyFinal === 0,
-      detail: JSON.stringify({ busyAtPark: r && r.busyAtPark, busyBeforeRelease: r && r.busyBeforeRelease, busyFinal: r && r.busyFinal }) },
+      cond: !!r && r.busyAtPark === 1 && r.settledBeforeRelease === false
+        && r.busyBeforeRelease === 1 && r.busyFinal === 0,
+      detail: JSON.stringify({ busyAtPark: r && r.busyAtPark, settledBeforeRelease: r && r.settledBeforeRelease,
+        busyBeforeRelease: r && r.busyBeforeRelease, busyFinal: r && r.busyFinal }) },
     { name: 'C4f-ii the parked write is not committed and nothing else dispatches before release; the settled write is then kept; zero dispatches after the boundary',
       cond: !!r && r.parkedWriteCommittedBeforeRelease === false && r.secondWriteDispatchedBeforeRelease === false
         && r.committedFirst === true && r.dispatchedSecond === false,

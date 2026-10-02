@@ -475,3 +475,32 @@ with sharper conditions.
   fetched).
 - Nothing in this round changed `src/`, and nothing in it should be read
   as a Runtime lifecycle fix; PR #1 remains OPEN, unmerged.
+
+## 9. Review round 2 closeout — consume the dispose settlement observation
+
+Baseline: `9fbeac730a9c38f53ae5d98b4e9e2519c9c34e7e`.
+`scenarioMidFlightDispose` already returned `settledBeforeRelease`, but
+the shared `disposeChecks` C4f-i omitted it. It now requires that value
+to be exactly `false` and includes it in failure details. No `src/`
+implementation changed.
+
+The browser self-check now takes the real, passing dispose control and
+changes only its observed `settledBeforeRelease` to `true`. Exactly C4f-i
+must reject that observation. This is a judgment-sensitivity test, not a
+claim that the real Runtime settled early. The normal consumer gate uses
+the same strengthened judgment with unmodified real observations.
+
+Actual closeout validation: the page's three lifecycle scenarios were run
+under Node with minimal browser-global stubs, real Runtime imports and
+MessageChannel scheduling; all normal shared judgments passed. Changing
+only the dispose settlement observation was accepted before this fix and
+is now rejected only by C4f-i. The existing early-busy, early-settlement
+and second-dispose-reason fault observations still fail their designated
+checks. `runtime-session-lifecycle` passed 91/91; JavaScript syntax and
+`git diff --check` passed. `git diff -- src/` is empty.
+
+Local limitation: no Chrome executable was available, so this closeout
+did not locally rerun the packaged browser consumer or browser self-check.
+The pushed commit triggers the existing CI consumer/browser gates; their
+status is recorded in the PR separately rather than predicted here.
+Historical Python E3 SystemError remains root-cause unconfirmed.
