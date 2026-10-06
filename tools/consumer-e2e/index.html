@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>locus-runtime consumer gate</title>
+</head>
+<body>
+<!--
+  MINIMAL OUT-OF-REPO CONSUMER (M3a exit gate; review round 1; round 2
+  strengthened the mid-flight observation timing and added the dispose
+  re-query + the fault-injection self-verification entry).
+
+  This page lives in its own directory outside the locus-runtime checkout.
+  It imports ONLY the package's public exports ('locus-runtime',
+  'locus-runtime/workspace', 'locus-runtime/worker-assets') — no source
+  paths, no sibling checkouts, no symlinks. Its own build tool is vite
+  (devDependency of THIS project).
+
+  Driver-level pieces the gate drives:
+  - a NARROW fetch recorder for the synthetic test target only (F3/C6):
+    matched requests are counted and answered deterministically, NEVER
+    fetched for real; every other request (Pyodide CDN, …) is delegated
+    to the page's real fetch untouched. Installed BEFORE any runtime
+    network operation, at the very top of this module.
+  - makeParkingVfs: an execution probe whose provider write PARKS on a
+    gated path. `entered` resolves when the write is truly dispatched
+    (provider entered the park), `release()` decides when it settles,
+    `log` records every transition. No fixed sleeps: ordering is proven
+    by these barriers (F2/C4).
+  - schedulingTurnBarrier (review round 2): one MessageChannel macrotask
+    awaited between a lifecycle boundary and the pre-release reads, so
+    boundary-scheduled promise/microtask reactions have run while the
+    provider release stays closed.
+  - scenario helpers (f1LocalDirectory / f1Opfs / f1CustomProvider) that
+    return structured results for the gate to assert on (F1/C9). Each
+    holds its own session/vfs and cleans up in finally.
+-->
+<script type="module">
+import {
+  createRuntime,
+  createWorkspace,
+  createMemoryWorkspace,
+  shellCommandNames,
+} from 'locus-runtime';
+import { PY_WORKER_SOURCE, GREP_WORKER_SOURCE } from 'locus-runtime/worker-assets';
+
+// ---- F3/C6: the narrow network recorder. Installed FIRST — before the
+// runtime is constructed, before anything can dispatch. Only the fixed
+// synthetic https test target is intercepted (counted + deterministic
+// Response); the real fetch handles everything else unchanged.
+const NET_TARGET = 'https://consumer-gate-counted.test';
+const net = { target: NET_TARGET, dispatched: [] };
+const realFetch = window.fetch.bind(window);
+window.fetch = function (input, init) {
+  const url = typeof input === 'string' ? input : (input && input.url) || String(input);
+  if (String(url).startsWith(NET_TARGET)) {
+    net.dispatched.push((init && init.method ? init.method : 'GET') + ' ' + String(url));
+    return Promise.resolve(new Response('counted-ok', {
+      status: 200, headers: { 'content-type': 'text/plain' },
+    }));
+  }
+  return realFetch(input, init);
+};
+
+// ---- shared timeout helper: every wait has a labeled deadline so a
+// broken barrier FAILS LOUDLY instead of hanging the gate.
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('consumer-gate timeout after ' + ms + 'ms: ' + label)), ms)),
+  ]);
+}
+
+// ---- one explicit SCHEDULING TURN (review round 2, gap A): a
+// MessageChannel macrotask. When this resolves, every promise reaction
+// and queueMicrotask callback the boundary could have scheduled HAS RUN,
+// while the provider's release is still closed (the write is still
+// parked). Replaces the round-1 same-stack reads, which could never see
+// an implementation that releases busy or settles the run one microtask
+// after the boundary. Not a sleep: the turn is deterministic; the
+// labeled timeout only guards a broken channel.
+function schedulingTurnBarrier() {
+  return new Promise((resolve) => {
+    const ch = new MessageChannel();
+    ch.port1.onmessage = () => { ch.port1.close(); ch.port2.close(); resolve(); };
+    ch.port2.postMessage(null);
+  });
+}
+
+const errors = [];
+window.addEventListener('error', (e) => errors.push(String(e.message || e)));
+window.addEventListener('unhandledrejection', (e) => errors.push('unhandledrejection: ' + String(e.reason && e.reason.message || e.reason)));
+
+(async () => {
+  const host = await createRuntime({
+    workerAssets: { pyWorkerSource: PY_WORKER_SOURCE, grepWorkerSource: GREP_WORKER_SOURCE },
+  });
+  const session = host.createSession();
+
+  const statusEvents = [];
+  session.onStatus((snap) => statusEvents.push(snap.interpreter));
+
+  function makeVfs() {
+    const vfs = createWorkspace();
+    vfs.mount('/mnt/workspace', createMemoryWorkspace({ name: 'workspace' }), 'read-write');
+    return vfs;
+  }
+  const vfs = makeVfs();
+
+  // ================================================================
+  // REVIEW ROUND 2 — FAULT-INJECTION SELF-VERIFICATION WRAPPERS.
+  // NOT part of the normal consumer gate: these wrap ONLY the public
+  // session surface, exist ONLY for selfcheck-faults.cjs, and the gate
+  // never constructs them. No product switch, no internal test entry,
+  // no copied execution algorithm — each wrapper stands in for a
+  // HYPOTHETICAL broken implementation to prove the strengthened
+  // assertions catch it (and that the round-1 assertions did not).
+  //   'early-busy-release' (fault A1) — one microtask after the caller's
+  //     abort, the public status misreports busyExecutions as 0 while the
+  //     real execution is still parked at the provider barrier.
+  //   'early-settle' (fault A2) — one microtask after the caller's abort,
+  //     the caller-visible promise resolves (cancellation-shaped) while
+  //     the real provider write is still parked. status() stays honest.
+  //   'dispose-reason-override' (fault B) — after the SECOND dispose
+  //     call, fresh execute/prepare refusals are overridden with the
+  //     second reason (a hypothetical reason clobber).
+  // ================================================================
+  // The fault B override reason, kept next to its wrapper (the
+  // self-check asserts the FRESH rejections carry it).
+  const SECOND_DISPOSE_FAULT_REASON = 'second dispose call (fault: reason override)';
+  function wrapSessionFault(s, kind) {
+    if (kind === 'early-busy-release') {
+      let misreport = false;
+      return {
+        status() {
+          const snap = s.status();
+          return misreport ? Object.assign({}, snap, { busyExecutions: 0 }) : snap;
+        },
+        execute(req) {
+          const signal = req && req.context && req.context.signal;
+          if (signal) {
+            signal.addEventListener('abort', () => { queueMicrotask(() => { misreport = true; }); }, { once: true });
+          }
+          return s.execute(req);
+        },
+        prepare(req) { return s.prepare(req); },
+        dispose(reason) { return s.dispose(reason); },
+      };
+    }
+    if (kind === 'early-settle') {
+      return {
+        status() { return s.status(); },
+        execute(req) {
+          const signal = req && req.context && req.context.signal;
+          const real = s.execute(req);
+          if (!signal) return real;
+          return new Promise((resolve) => {
+            const onAbort = () => {
+              // THE FAULT: settled one microtask after the abort, while
+              // the real provider write is still parked. The real run's
+              // own late settlement is handled here and ignored.
+              queueMicrotask(() => resolve({
+                ok: false, isError: true, output: 'bash: cancelled by caller',
+              }));
+            };
+            if (signal.aborted) onAbort();
+            else signal.addEventListener('abort', onAbort, { once: true });
+            real.then(resolve, () => {});
+          });
+        },
+        prepare(req) { return s.prepare(req); },
+        dispose(reason) { return s.dispose(reason); },
+      };
+    }
+    if (kind === 'dispose-reason-override') {
+      let secondDisposeHappened = false;
+      const override = () => new Error('runtime session disposed: ' + SECOND_DISPOSE_FAULT_REASON);
+      // The disposed session surfaces its refusal as a REJECTED PROMISE
+      // (async execute / Promise.reject prepare), so the override hooks
+      // the rejection, not a synchronous throw.
+      const refuse = (attempt) => {
+        let real;
+        try { real = attempt(); } catch (e) { real = Promise.reject(e); }
+        return secondDisposeHappened
+          ? real.then((v) => v, (e) => { throw override(e); })
+          : real;
+      };
+      return {
+        status() { return s.status(); },
+        execute(req) {
+          return refuse(() => s.execute(req));
+        },
+        prepare(req) {
+          return refuse(() => s.prepare(req));
+        },
+        dispose(reason) {
+          if (String(reason) === 'second dispose call') secondDisposeHappened = true;
+          return s.dispose(reason);
+        },
+      };
+    }
+    throw new Error('unknown fault kind: ' + String(kind));
+  }
+
+  // F2/C4 probe: a dedicated session whose provider write parks on a
+  // gated path. `entered` is an explicit Promise (the write IS dispatched
+  // and parked); `release()` decides when it settles; `log` records every
+  // transition. No timers — the gate awaits the barriers.
+  // `faultKind` (review round 2) is SELF-VERIFICATION ONLY: the normal
+  // gate never passes it, so the gate always drives the real
+  // implementation unwrapped.
+  function makeParkingVfs(faultKind) {
+    const inner = makeVfs();
+    let s = host.createSession();
+    if (faultKind) s = wrapSessionFault(s, faultKind);
+    const p = {
+      session: s, vfs: inner, log: [], parkedPath: null,
+      entered: null, release: () => {},
+      execPromise: null, settled: false, result: null, rejection: null,
+    };
+    let enterResolve = null;
+    let openGate = () => {};
+    p.hold = (path) => {
+      p.parkedPath = path;
+      p.entered = new Promise((r) => { enterResolve = r; });
+      p.gate = new Promise((r) => { openGate = r; });
+    };
+    p.release = () => { openGate(); };
+    const innerWrite = inner.write.bind(inner);
+    inner.write = async (path, text) => {
+      p.log.push('write:enter:' + path);
+      if (path === p.parkedPath) {
+        p.log.push('write:park:' + path);
+        if (enterResolve) enterResolve();
+        await p.gate;
+        p.log.push('write:resume:' + path);
+      }
+      const out = await innerWrite(path, text);
+      p.log.push('write:commit:' + path);
+      return out;
+    };
+    p.exec = (input, contextExtra) => {
+      p.execPromise = s.execute({
+        kind: 'shell',
+        input,
+        context: Object.assign({ filesystem: inner }, contextExtra || {}),
+      }).then(
+        (res) => { p.settled = true; p.result = res; return res; },
+        (e) => { p.settled = true; p.rejection = e; throw e; },
+      );
+      return p.execPromise;
+    };
+    // Cleanup that can never hang: settle the park, then retire the session.
+    p.cleanup = () => {
+      try { p.release(); } catch (e) { /* idempotent */ }
+      if (!s.status().disposed) s.dispose('probe cleanup');
+    };
+    return p;
+  }
+
+  // Generic host policy fixture (the injection seam any host product uses).
+  const GUARD = '/home/locus/keep';
+  const policy = {
+    checkMove(a) {
+      return (a.source.indexOf(GUARD) === 0 || a.destination.indexOf(GUARD) === 0)
+        ? { allowed: false, reason: 'kept tree is immutable' }
+        : { allowed: true };
+    },
+    checkRemove(a) {
+      return a.target.indexOf(GUARD) === 0
+        ? { allowed: false, reason: 'kept tree is immutable' }
+        : { allowed: true };
+    },
+    isPolicyRefusal(e) { return !!e && e.code === 'kept_refusal'; },
+  };
+
+  // Scripted execution-authorization port (deny recordings, no dispatch).
+  const authState = { asks: 0, outcome: 'allow', scope: 'once' };
+  const authorization = {
+    request: async () => {
+      authState.asks++;
+      return { outcome: authState.outcome, scope: authState.scope };
+    },
+  };
+
+  async function exec(input, context) {
+    const res = await session.execute({
+      kind: 'shell',
+      input,
+      context: Object.assign({ filesystem: vfs }, context || {}),
+    });
+    return { output: res.output, ok: res.ok, isError: !!res.isError, boundary: res.boundary, backend: res.backend, operation: res.operation };
+  }
+
+  async function runPython(code) {
+    const res = await session.execute({ kind: 'python', input: code, context: { filesystem: vfs } });
+    return { ok: res.ok, output: res.stdout, stderr: res.stderr };
+  }
+
+  // ---------- F1/C9: the workspace provider subpath ----------
+  async function importWorkspaceSubpath() {
+    // The purity oracle is LOCAL to this import: snapshot the window keys
+    // immediately before/after the dynamic import, so the driver's own
+    // boot-time names (__consumer, …) never count as "leaks".
+    const before = new Set(Object.getOwnPropertyNames(window));
+    try {
+      const api = await import('locus-runtime/workspace');
+      window.__consumer.workspaceApi = api;
+      return {
+        ok: true,
+        exports: Object.keys(api).sort(),
+        kinds: {
+          WorkspaceAdapter: typeof api.WorkspaceAdapter,
+          LocalDirectoryWorkspace: typeof api.LocalDirectoryWorkspace,
+          OPFSWorkspace: typeof api.OPFSWorkspace,
+          normalizeWorkspacePath: typeof api.normalizeWorkspacePath,
+          ensureWorkspacePermission: typeof api.ensureWorkspacePermission,
+          vfsError: typeof api.vfsError,
+        },
+        newGlobals: Object.getOwnPropertyNames(window).filter((k) => !before.has(k)),
+      };
+    } catch (e) {
+      return { ok: false, name: e && e.name, message: String(e && e.message || e) };
+    }
+  }
+
+  // A WebIDL-conforming directory-handle stub backed by a JS object tree
+  // (same technique as the package's own workspace unit suite): NO real
+  // directory picker is ever shown.
+  function makeDirStub(name) {
+    const files = new Map();
+    const dirs = new Map();
+    const stub = {
+      name, kind: 'directory', blockedNames: new Set(),
+      async getDirectoryHandle(n, opts) {
+        if (dirs.has(n)) return dirs.get(n);
+        if (files.has(n)) { const e = new Error('kind mismatch'); e.name = 'TypeMismatchError'; throw e; }
+        if (!opts || !opts.create) { const e = new Error('missing'); e.name = 'NotFoundError'; throw e; }
+        const d = makeDirStub(n); dirs.set(n, d); return d;
+      },
+      async getFileHandle(n, opts) {
+        if (stub.blockedNames.has(n)) { const e = new Error('permission'); e.name = 'NotAllowedError'; throw e; }
+        if (files.has(n)) return files.get(n);
+        if (dirs.has(n)) { const e = new Error('kind mismatch'); e.name = 'TypeMismatchError'; throw e; }
+        if (!opts || !opts.create) { const e = new Error('missing'); e.name = 'NotFoundError'; throw e; }
+        const f = {
+          name: n, kind: 'file', bytes: new Uint8Array(0),
+          async getFile() {
+            return { size: this.bytes.byteLength, lastModified: 1, arrayBuffer: async () => this.bytes.buffer.slice(this.bytes.byteOffset, this.bytes.byteOffset + this.bytes.byteLength) };
+          },
+          async createWritable() {
+            const fh = this;
+            return {
+              write: async (d) => { fh.bytes = typeof d === 'string' ? new TextEncoder().encode(d) : new Uint8Array(d); },
+              close: async () => {},
+            };
+          },
+        };
+        files.set(n, f); return f;
+      },
+      async removeEntry(n) {
+        if (files.has(n)) { files.delete(n); return; }
+        if (dirs.has(n)) { dirs.delete(n); return; }
+        const e = new Error('missing'); e.name = 'NotFoundError'; throw e;
+      },
+      async *entries() {
+        for (const [n, d] of dirs) yield [n, d];
+        for (const [n, f] of files) yield [n, f];
+      },
+    };
+    return stub;
+  }
+
+  async function f1LocalDirectory() {
+    const out = {};
+    const W = window.__consumer.workspaceApi;
+    // write/read through a controlled handle (no picker), incl. a nested dir
+    const dir = makeDirStub('picked-folder');
+    const ws = new W.LocalDirectoryWorkspace(dir);
+    await ws.write('a/b.txt', 'hello-local');
+    out.readBack = await ws.read('a/b.txt');
+    // '..' INSIDE the tree still resolves (existing semantics preserved) —
+    // written BEFORE the listing so the listing proves both entries.
+    await ws.write('a/../c.txt', 'resolved');
+    out.dotdotResolved = await ws.read('c.txt');
+    out.listRoot = (await ws.list('')).map((e) => e.name + ':' + e.kind);
+    out.providerName = ws.name;
+    // the shared normalization: '..' past the root and drive letters refuse
+    try { W.normalizeWorkspacePath('../escape'); out.escapeRejected = false; }
+    catch (e) { out.escapeRejected = /path escapes workspace/.test(e.message); }
+    try { W.normalizeWorkspacePath('C:/win'); out.driveRejected = false; }
+    catch (e) { out.driveRejected = /invalid path/.test(e.message); }
+    // permission helper: denied stays false, prompt→granted true, no-API true
+    out.permissionDenied = await W.ensureWorkspacePermission({
+      queryPermission: async () => 'denied', requestPermission: async () => 'denied',
+    }) === false;
+    out.permissionPromptGranted = await W.ensureWorkspacePermission({
+      queryPermission: async () => 'prompt', requestPermission: async () => 'granted',
+    }) === true;
+    out.permissionNoApi = await W.ensureWorkspacePermission({}) === true;
+    // a real NotAllowedError from the handle propagates honestly (never swallowed)
+    const blocked = makeDirStub('blocked');
+    blocked.blockedNames.add('x.txt');
+    const wsBlocked = new W.LocalDirectoryWorkspace(blocked);
+    let writeError = null;
+    try { await wsBlocked.write('x.txt', 'v'); } catch (e) { writeError = e; }
+    out.blockedWriteName = writeError && writeError.name;
+    return out;
+  }
+
+  // The durable-provider proof: the consumer takes a TEMPORARY OPFS
+  // directory (test-specific name, removed in finally), mounts an
+  // OPFSWorkspace, writes through the session shell, and reads back with a
+  // FRESH provider instance — a second in-memory double could not pass this.
+  async function f1Opfs() {
+    const out = {};
+    const W = window.__consumer.workspaceApi;
+    const root = await navigator.storage.getDirectory();
+    const dirName = 'locus-consumer-gate-' + Math.random().toString(36).slice(2, 10);
+    out.dirName = dirName;
+    const dir = await root.getDirectoryHandle(dirName, { create: true });
+    let session2 = null;
+    try {
+      const provider = new W.OPFSWorkspace(dir, { name: 'gate-opfs' });
+      const vfs2 = makeVfs();
+      vfs2.mount('/mnt/workspace', provider, 'read-write');
+      session2 = host.createSession();
+      const r = await session2.execute({
+        kind: 'shell',
+        input: 'echo durable-opfs > /mnt/workspace/probe.txt && cat /mnt/workspace/probe.txt',
+        context: { filesystem: vfs2 },
+      });
+      out.shellWriteRead = { ok: r.ok, output: r.output };
+      // A brand-new provider instance over the SAME handle reads the bytes
+      // off the (real, durable) filesystem — not from any memory copy.
+      const fresh = new W.OPFSWorkspace(dir, { name: 'gate-opfs-fresh' });
+      out.freshRead = await fresh.read('probe.txt');
+      out.freshList = (await fresh.list('')).map((e) => e.name);
+      out.mountedProvider = vfs2.mounts.some((m) => m.path === '/mnt/workspace' && m.provider === provider);
+    } finally {
+      await root.removeEntry(dirName, { recursive: true });
+      if (session2 && !session2.status().disposed) session2.dispose('opfs probe cleanup');
+    }
+    // cleanup is real: the directory is gone
+    try { await root.getDirectoryHandle(dirName); out.cleaned = false; }
+    catch (e) { out.cleaned = true; }
+    return out;
+  }
+
+  // A minimal HOST-CUSTOM provider built ONLY from the public surface
+  // (extends WorkspaceAdapter, normalizes through normalizeWorkspacePath,
+  // throws through vfsError) — mounted and exercised through a session.
+  async function f1CustomProvider() {
+    const out = {};
+    const W = window.__consumer.workspaceApi;
+    class ConsumerBoxWorkspace extends W.WorkspaceAdapter {
+      constructor(opts) {
+        super();
+        this.name = (opts && opts.name) || 'consumer-box';
+        this.files = new Map();
+      }
+      _rel(path) { return W.normalizeWorkspacePath(path); }
+      async write(path, data) {
+        this.files.set(this._rel(path), typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data));
+      }
+      async read(path) {
+        const b = this.files.get(this._rel(path));
+        if (!b) throw W.vfsError('NotFoundError', 'no such file or directory: ' + path);
+        return new TextDecoder('utf-8').decode(b);
+      }
+      async readBytes(path) {
+        const b = this.files.get(this._rel(path));
+        if (!b) throw W.vfsError('NotFoundError', 'no such file or directory: ' + path);
+        return b.slice();
+      }
+      async remove(path) {
+        if (!this.files.delete(this._rel(path))) throw W.vfsError('NotFoundError', 'no such file: ' + path);
+      }
+      async mkdir() { /* flat box */ }
+      async list() { return Array.from(this.files.keys()).map((n) => ({ name: n, kind: 'file' })); }
+      async stat(path) {
+        const b = this.files.get(this._rel(path));
+        if (!b) throw W.vfsError('NotFoundError', 'no such file or directory: ' + path);
+        return { kind: 'file', size: b.byteLength, modified: null };
+      }
+      async exists(path) {
+        try { await this.stat(path); return true; }
+        catch (e) { if (e && e.name === 'NotFoundError') return false; throw e; }
+      }
+    }
+    const box = new ConsumerBoxWorkspace({ name: 'consumer-box' });
+    const vfs3 = makeVfs();
+    vfs3.mount('/mnt/box', box, 'read-write');
+    const session3 = host.createSession();
+    try {
+      const r = await session3.execute({
+        kind: 'shell',
+        input: 'echo boxed > /mnt/box/x.txt && cat /mnt/box/x.txt',
+        context: { filesystem: vfs3 },
+      });
+      out.shellWriteRead = { ok: r.ok, output: r.output };
+      out.providerReceivedWrite = box.files.has('x.txt');
+      out.vfsReadsProvider = (await vfs3.read('/mnt/box/x.txt')) === 'boxed\n';
+      // the provider's own boundary: escape attempts refuse through the
+      // SHARED normalization
+      try { await box.write('../outside.txt', 'x'); out.providerEscapeRejected = false; }
+      catch (e) { out.providerEscapeRejected = /path escapes workspace/.test(e.message); }
+      // NotFoundError classification: exists() is false, not a thrown fault
+      out.missingIsFalse = (await vfs3.exists('/mnt/box/never.txt')) === false;
+      const rm = await session3.execute({ kind: 'shell', input: 'rm /mnt/box/x.txt', context: { filesystem: vfs3 } });
+      out.removedThroughVfs = rm.ok === true && box.files.size === 0;
+    } finally {
+      if (!session3.status().disposed) session3.dispose('custom provider cleanup');
+    }
+    return out;
+  }
+
+  // ---------- F2/C4 scenarios ----------
+  // Each scenario runs INSIDE one async function with a labeled timeout on
+  // every wait and a finally that settles the park and retires the session,
+  // so a failing assertion can never leave a parked promise hanging the
+  // gate. The gate asserts on the returned structure.
+
+  // Composite shell whose FIRST write parks; a CALLER abort lands while it
+  // is dispatched-but-unsettled; the second write must never dispatch.
+  // Review round 2: the boundary is followed by an explicit scheduling
+  // turn, and the pre-release state is read AFTER it — settled/busy/
+  // commit/dispatch facts can no longer hide behind a same-stack read.
+  async function scenarioMidFlightAbort(opts) {
+    const o = opts || {};
+    const p = makeParkingVfs(o.fault);
+    const ac = new AbortController();
+    try {
+      p.hold('/mnt/workspace/first.txt');
+      p.exec('echo first > /mnt/workspace/first.txt && echo second > /mnt/workspace/second.txt', { signal: ac.signal });
+      await withTimeout(p.entered, 5000, 'mid-abort: the first write never reached the provider park');
+      const busyAtPark = p.session.status().busyExecutions;
+      const settledAtPark = p.settled;
+      ac.abort();
+      // The ROUND-1 observation (same-stack read, no scheduling turn) —
+      // recorded ONLY for the fault-injection contrast; C4e-i now
+      // asserts the barrier-backed observation below.
+      const busyAfterBoundarySync = p.session.status().busyExecutions;
+      await withTimeout(schedulingTurnBarrier(), 5000, 'mid-abort: the scheduling-turn barrier never fired');
+      // PRE-RELEASE observation (review round 2): every microtask the
+      // abort could have scheduled has run; release is still closed.
+      const settledBeforeRelease = p.settled;
+      const busyBeforeRelease = p.session.status().busyExecutions;
+      const parkedWriteCommittedBeforeRelease = p.log.some((l) => l.startsWith('write:commit:/mnt/workspace/first.txt'));
+      const secondWriteDispatchedBeforeRelease = p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/second.txt'));
+      p.release();
+      const res = await withTimeout(p.execPromise, 5000, 'mid-abort: execute did not settle after release');
+      const after = await p.session.execute({ kind: 'shell', input: 'echo still-usable', context: { filesystem: p.vfs } });
+      return {
+        busyAtPark, settledAtPark, busyAfterBoundarySync,
+        settledBeforeRelease, busyBeforeRelease,
+        parkedWriteCommittedBeforeRelease, secondWriteDispatchedBeforeRelease,
+        res: { ok: res.ok, isError: !!res.isError, output: res.output, boundary: res.boundary },
+        busyFinal: p.session.status().busyExecutions,
+        committedFirst: await p.vfs.exists('/mnt/workspace/first.txt'),
+        dispatchedSecond: p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/second.txt')),
+        after: { ok: after.ok, output: after.output },
+        log: p.log,
+      };
+    } finally { p.cleanup(); }
+  }
+
+  // A dispose lands while the first write of a composite shell is
+  // dispatched-but-unsettled: the busy count stays TRUE until release,
+  // the settled write is kept, nothing dispatches after, and the session
+  // refuses execute AND prepare forever with the same first reason.
+  // Review round 2: scheduling-turn barrier + pre-release observation
+  // (gap A), and the SECOND dispose is followed by FRESH execute/prepare
+  // calls whose rejections are observed anew — never the cached
+  // first-round reasons (gap B).
+  async function scenarioMidFlightDispose(opts) {
+    const o = opts || {};
+    const p = makeParkingVfs(o.fault);
+    try {
+      p.hold('/mnt/workspace/d1.txt');
+      p.exec('echo d1 > /mnt/workspace/d1.txt && echo d2 > /mnt/workspace/d2.txt');
+      await withTimeout(p.entered, 5000, 'mid-dispose: the first write never reached the provider park');
+      const busyAtPark = p.session.status().busyExecutions;
+      p.session.dispose('consumer mid-flight dispose');
+      const busyAfterBoundarySync = p.session.status().busyExecutions;
+      await withTimeout(schedulingTurnBarrier(), 5000, 'mid-dispose: the scheduling-turn barrier never fired');
+      const settledBeforeRelease = p.settled;
+      const busyBeforeRelease = p.session.status().busyExecutions;
+      const parkedWriteCommittedBeforeRelease = p.log.some((l) => l.startsWith('write:commit:/mnt/workspace/d1.txt'));
+      const secondWriteDispatchedBeforeRelease = p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/d2.txt'));
+      p.release();
+      const res = await withTimeout(p.execPromise, 5000, 'mid-dispose: execute did not settle after release');
+      let executeRejection = null;
+      try { await p.session.execute({ kind: 'shell', input: 'echo nope', context: { filesystem: p.vfs } }); }
+      catch (e) { executeRejection = String(e && e.message || e); }
+      let prepareRejection = null;
+      try { await p.session.prepare({}); }
+      catch (e) { prepareRejection = String(e && e.message || e); }
+      const logLengthBeforeSecondDispose = p.log.length;
+      // SECOND dispose (review round 2, gap B): the assertions below
+      // must observe what happens AFTER this call, not reuse the cached
+      // rejections captured above.
+      let secondDisposeError = null;
+      try { p.session.dispose('second dispose call'); } catch (e) { secondDisposeError = String(e && e.message || e); }
+      let executeRejection2 = null;
+      try { await p.session.execute({ kind: 'shell', input: 'echo nope-again', context: { filesystem: p.vfs } }); }
+      catch (e) { executeRejection2 = String(e && e.message || e); }
+      let prepareRejection2 = null;
+      try { await p.session.prepare({}); }
+      catch (e) { prepareRejection2 = String(e && e.message || e); }
+      return {
+        busyAtPark, busyAfterBoundarySync,
+        settledBeforeRelease, busyBeforeRelease,
+        parkedWriteCommittedBeforeRelease, secondWriteDispatchedBeforeRelease,
+        res: { ok: res.ok, isError: !!res.isError, output: res.output, boundary: res.boundary },
+        busyFinal: p.session.status().busyExecutions,
+        committedFirst: await p.vfs.exists('/mnt/workspace/d1.txt'),
+        dispatchedSecond: p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/d2.txt')),
+        executeRejection, prepareRejection,
+        secondDisposeError, executeRejection2, prepareRejection2,
+        busyAfterSecondDispose: p.session.status().busyExecutions,
+        dispatchesAfterSecondDispose: p.log.slice(logLengthBeforeSecondDispose)
+          .filter((l) => l.startsWith('write:enter:')).length,
+        log: p.log,
+      };
+    } finally { p.cleanup(); }
+  }
+
+  // The strengthened reset boundary (review round 2): explicit
+  // pre-release unsettled/busy assertions observed ACROSS A SCHEDULING
+  // TURN, then the honest boundary report and a reusable session.
+  async function scenarioResetBoundary(opts) {
+    const o = opts || {};
+    const p = makeParkingVfs(o.fault);
+    try {
+      p.hold('/mnt/workspace/first.txt');
+      p.exec('echo first > /mnt/workspace/first.txt && echo second > /mnt/workspace/second.txt');
+      await withTimeout(p.entered, 5000, 'reset: the first write never reached the provider park');
+      const busyAtPark = p.session.status().busyExecutions;
+      const settledAtPark = p.settled;
+      p.session.reset('consumer boundary');
+      const busyAfterBoundarySync = p.session.status().busyExecutions;
+      await withTimeout(schedulingTurnBarrier(), 5000, 'reset: the scheduling-turn barrier never fired');
+      const settledBeforeRelease = p.settled;
+      const busyBeforeRelease = p.session.status().busyExecutions;
+      const parkedWriteCommittedBeforeRelease = p.log.some((l) => l.startsWith('write:commit:/mnt/workspace/first.txt'));
+      const secondWriteDispatchedBeforeRelease = p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/second.txt'));
+      p.release();
+      const res = await withTimeout(p.execPromise, 5000, 'reset: execute did not settle after release');
+      const after = await p.session.execute({ kind: 'shell', input: 'echo still-usable', context: { filesystem: p.vfs } });
+      return {
+        busyAtPark, settledAtPark, busyAfterBoundarySync,
+        settledBeforeRelease, busyBeforeRelease,
+        parkedWriteCommittedBeforeRelease, secondWriteDispatchedBeforeRelease,
+        res: { ok: res.ok, isError: !!res.isError, output: res.output, boundary: res.boundary },
+        busyFinal: p.session.status().busyExecutions,
+        committedFirst: await p.vfs.exists('/mnt/workspace/first.txt'),
+        dispatchedSecond: p.log.some((l) => l.startsWith('write:enter:/mnt/workspace/second.txt')),
+        after: { ok: after.ok, output: after.output },
+        log: p.log,
+      };
+    } finally { p.cleanup(); }
+  }
+
+  // The LAST side effect of the run parks (no following command) and a
+  // caller abort lands in the dispatched-but-unsettled window. The control
+  // variant proves the parking mechanism itself never downgrades a run.
+  async function scenarioLastWrite(control) {
+    const p = makeParkingVfs();
+    const ac = new AbortController();
+    try {
+      p.hold('/mnt/workspace/only.txt');
+      p.exec('echo pre && echo data > /mnt/workspace/only.txt', control ? undefined : { signal: ac.signal });
+      await withTimeout(p.entered, 5000, (control ? 'last-write control' : 'last-write abort') + ': the write never reached the provider park');
+      if (!control) ac.abort();
+      p.release();
+      const res = await withTimeout(p.execPromise, 5000, 'last-write: execute did not settle after release');
+      return {
+        res: { ok: res.ok, isError: !!res.isError, output: res.output, boundary: res.boundary },
+        committedFact: await p.vfs.read('/mnt/workspace/only.txt'),
+        log: p.log,
+      };
+    } finally { p.cleanup(); }
+  }
+
+  window.__consumer = {
+    host, session, vfs, makeVfs, makeParkingVfs, policy, authorization, authState,
+    exec, runPython, errors, statusEvents, net,
+    importWorkspaceSubpath, f1LocalDirectory, f1Opfs, f1CustomProvider,
+    scenarioMidFlightAbort, scenarioMidFlightDispose, scenarioResetBoundary, scenarioLastWrite,
+    // Review round 2: fault-injection SELF-VERIFICATION entry — invoked
+    // ONLY by selfcheck-faults.cjs; the normal consumer gate never calls
+    // it. selfcheck(null, name) is the no-fault control (the real
+    // implementation); a fault name wraps the session for that one run.
+    selfcheck: (fault, scenarioName) => {
+      const fn = { abort: scenarioMidFlightAbort, dispose: scenarioMidFlightDispose, reset: scenarioResetBoundary }[scenarioName];
+      if (!fn) throw new Error('unknown scenario: ' + String(scenarioName));
+      return fn(fault ? { fault } : undefined);
+    },
+    withTimeout,
+    capabilities: () => host.capabilities(),
+    describeCommands: () => session.describeCommands(),
+    commands: shellCommandNames(),
+    // import-time purity probes for the CONSUMER bundle graph
+    purity: { registry: !!window.__LOCUS_RUNTIME_CORE__ },
+    ready: true,
+  };
+  document.title = 'consumer-ready';
+})().catch((e) => {
+  window.__consumerBootError = String(e && e.message || e);
+  document.title = 'consumer-boot-failed';
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "plugin": {
+    "id": "locus-test-plugin",
+    "version": "1.0.0",
+    "displayName": "Locus Test Plugin",
+    "description": "TEST ONLY synthetic pure-Python wheel plugin fixture.",
+    "runtime": "python",
+    "authority": "none",
+    "provides": {
+      "pythonImports": ["locus_test_plugin"]
+    }
+  },
+  "artifacts": [
+    {
+      "path": "artifacts/locus_test_plugin-1.0.0-py3-none-any.whl",
+      "format": "python-wheel"
+    }
+  ]
+}

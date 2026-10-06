@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "capability": {
+    "id": "package-test-capability",
+    "version": "1",
+    "displayName": "Package Test Capability",
+    "description": "TEST ONLY fixture for the capability package core.",
+    "plugins": ["locus-test-plugin"],
+    "skills": ["test-workflow"],
+    "mcps": []
+  }
+}
