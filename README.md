@@ -8,12 +8,15 @@ bootstrap, isolated regex-grep workers, and a bounded anonymous network
 transport. Framework-free ES modules — no Vue, no model knowledge, no product
 state.
 
-**Status: extraction candidate (M3a).** This repository was extracted from
-[boccchi2993/Locus-browser-agent-runtime](https://github.com/boccchi2993/Locus-browser-agent-runtime)
-@ `2aec76e` (`refactor/repository-split-m2c`, PR #7 head) as the first step of
-the three-repository split. Until the product's imports switch (M3c), the
-product repository remains the authoritative implementation; see
-[docs/PROVENANCE.md](docs/PROVENANCE.md).
+**Status: repository split complete; implementation merged into `main`.**
+This repository is the authoritative Runtime implementation. It works independently
+of [locus-harness](https://github.com/boccchi2993/locus-harness); [locus-product](https://github.com/boccchi2993/locus-product)
+composes both cores through their public package APIs and pins tested commit pairs.
+The original repository is extraction provenance, not a second implementation to maintain.
+See [provenance](docs/PROVENANCE.md), the
+[M4b mainline verification](https://github.com/boccchi2993/locus-product/blob/main/docs/M4B-MAINLINE-VERIFICATION.md),
+and [maintenance TODO](TODO.md). Split completion does not claim every CI run passed;
+known browser-startup failures remain documented.
 
 ## Install / use
 
@@ -83,7 +86,7 @@ session.dispose('host teardown');
 ## Public API
 
 `createRuntime(opts)` — opts: `{ workerAssets: { pyWorkerSource, grepWorkerSource } }`
-(both required non-empty strings; invalid configuration fails synchronously).
+(both required non-empty strings; invalid configuration rejects the returned Promise).
 Returns a `Promise<RuntimeHost>`.
 
 `RuntimeHost`:
