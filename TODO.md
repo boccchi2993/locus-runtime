@@ -7,6 +7,7 @@ The repository split is complete. These are maintenance follow-ups, not unfinish
 - [ ] Open. Owner: Runtime browser-test infrastructure; coordinate with Harness/Product when evidence establishes a shared cause.
 - Evidence: [Runtime run 36987973661](https://github.com/boccchi2993/locus-runtime/actions/runs/36987973661) failed on attempt 1 before browser assertions; the authorized attempt 2 passed. [Runtime main run 37461978810](https://github.com/boccchi2993/locus-runtime/actions/runs/37461978810) failed in the out-of-repository consumer at CDP readiness while its separate browser-gates job passed.
 - Root cause remains unknown. A passing sibling run or rerun does not establish an environment cause or rule out a regression. Historical Python E3/B-PY1 errors are a separate observation, not a demonstrated common cause.
+- Runner containment (2026-10-12): CI runners are pinned to ubuntu-24.04 while this item is open; upgrading the runner image must be a separate change and waits for a conclusion here.
 
 Implementation path:
 
