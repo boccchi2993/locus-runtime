@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: AGENTS.md and CLAUDE.md must be identical
+        run: cmp AGENTS.md CLAUDE.md
       - uses: actions/setup-node@v4
         with:
           node-version: 24
