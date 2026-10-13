@@ -3455,6 +3455,10 @@ async function shCp(ctx, args) {
   // bad later source can never leave a half-made earlier copy. Unlike mv,
   // the SOURCE mount is never asserted writable — cp does not remove it. ----
   const plan = [];
+  // Destinations already assigned to an earlier source in THIS invocation:
+  // two sources resolving to one finalAbs would silently overwrite each
+  // other, so the later one is refused before any write happens.
+  const claimed = new Set();
   for (const srcDisplay of sources) {
     throwIfCancelled(signal, 'cp');
     let srcAbs;
@@ -3480,6 +3484,10 @@ async function shCp(ctx, args) {
     if (srcStat.kind === 'directory' && finalAbs.startsWith(srcAbs + '/')) {
       return shErr('cp: cannot copy a directory into itself: ' + srcDisplay);
     }
+    if (claimed.has(finalAbs)) {
+      return shErr('cp: ' + srcDisplay + ': would overwrite ' + finalAbs + ' (already the target of an earlier source)');
+    }
+    claimed.add(finalAbs);
     if (await ctx.vfs.exists(finalAbs)) {
       return shErr('cp: destination exists: ' + finalAbs);
     }

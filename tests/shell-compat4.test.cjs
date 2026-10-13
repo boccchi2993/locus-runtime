@@ -290,6 +290,18 @@ async function run() {
     const cp14 = await exec('bash', 'cp bin14.bin bin14copy.bin', ws14);
     check('CP14 binary copy is byte-identical', cp14.success && sameBytes(ws14.files['bin14copy.bin'], binBytes)
       && sameBytes(ws14.files['bin14.bin'], binBytes), cp14.output);
+
+    // CP15: two sources whose basenames collide on the destination directory.
+    // The second source must be refused in preflight — nothing is written.
+    const ws15 = new TreeWS({ 'x/f.txt': 'FIRST\n', 'y/f.txt': 'SECOND\n' });
+    await ws15.mkdir('out');
+    const cp15 = await exec('bash', 'cp x/f.txt y/f.txt out', ws15);
+    check('CP15 colliding sources refused in preflight, nothing written', !cp15.success
+      && cp15.output.includes('would overwrite')
+      && !(await ws15.exists('out/f.txt'))
+      && dec(ws15.files['x/f.txt']) === 'FIRST\n'
+      && dec(ws15.files['y/f.txt']) === 'SECOND\n', cp15.output + ' | out/f.txt='
+      + JSON.stringify(ws15.files['out/f.txt'] ? dec(ws15.files['out/f.txt']) : 'absent'));
   }
 
   // ---------- CMB. combinations and registry surfacing ----------
