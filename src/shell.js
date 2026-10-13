@@ -1841,6 +1841,21 @@ const SHELL_COMMANDS = {
     summary: 'move/rename files or directories; fails if the destination exists (no -f)',
     stdin: false, run: shMv,
   },
+  mkdir: {
+    usage: 'mkdir [-p] <dir>...',
+    summary: 'create directories; -p creates missing parents and ignores existing directories',
+    stdin: false, run: shMkdir,
+  },
+  cp: {
+    usage: 'cp [-r|-R] <src>... <dest>',
+    summary: 'copy files (-r for directories); fails if the destination exists (no -f)',
+    stdin: false, run: shCp,
+  },
+  touch: {
+    usage: 'touch <file>...',
+    summary: 'create empty files if missing; existing files are left unchanged (timestamps are not updated)',
+    stdin: false, run: shTouch,
+  },
   rm: {
     usage: 'rm [-f] [-r|-R] <path>...',
     summary: 'remove files; -r for recursive directory removal, -f to ignore missing paths',
@@ -3030,6 +3045,9 @@ async function shWhich(ctx, args) {
 const MV_MAX_ENTRIES = 1000;
 const MV_MAX_TOTAL_BYTES = 25 * 1024 * 1024;
 
+const CP_MAX_ENTRIES = 1000;
+const CP_MAX_TOTAL_BYTES = 25 * 1024 * 1024;
+
 function baseName(rel) {
   return rel.slice(rel.lastIndexOf('/') + 1);
 }
@@ -3287,6 +3305,299 @@ async function mvDirectory(ctx, srcAbs, finalAbs, signal) {
     if (isCancelledError(e)) throw e;
     return 'mv: delete failed at ' + (deleted.length ? 'entry after ' + deleted[deleted.length - 1] : srcAbs)
       + ' (' + (e && e.message ? e.message : String(e)) + '); destination is complete, source may be partially removed';
+  }
+  return null;
+}
+
+// ---------- mkdir / cp / touch ----------
+// Companions to mv sharing its bounded, verify-as-you-go conventions. cp
+// never touches its source, so a source on a read-only mount (e.g.
+// /mnt/upload) is copyable — the only mount authority cp needs is a
+// writable DESTINATION. No new policy port: the VFS's own per-file write
+// guards (read-only / protected root / skill-tree approval) already sit on
+// every destination write cp performs.
+
+async function shMkdir(ctx, args) {
+  const signal = ctx.opts && ctx.opts.signal;
+  let recursive = false;
+  const displays = [];
+  for (const t of args) {
+    if (!t.quoted && t.text.charAt(0) === '-' && t.text.length > 1) {
+      if (t.text === '-p') { recursive = true; continue; }
+      return shErr('mkdir: unsupported option: ' + t.text);
+    }
+    displays.push(t.text);
+  }
+  if (!displays.length) return shErr('usage: mkdir [-p] <dir>...');
+
+  for (const display of displays) {
+    throwIfCancelled(signal, 'mkdir');
+    let abs;
+    try {
+      abs = resolveShellPath(ctx, display);
+    } catch (e) {
+      return shErr('mkdir: ' + display + ': ' + e.message);
+    }
+    let st = null;
+    try {
+      st = await ctx.vfs.stat(abs);
+    } catch (e) {
+      if (!e || e.name !== 'NotFoundError') return shErr('mkdir: ' + display + ': ' + writableErrMsg(e));
+    }
+    if (st) {
+      // An existing FILE never satisfies mkdir, -p or not; an existing
+      // directory is only acceptable when -p was given.
+      if (st.kind === 'directory' && recursive) continue;
+      return shErr('mkdir: ' + display + ': File exists');
+    }
+    if (!recursive) {
+      const parentErr = await checkParentDir(ctx.vfs, abs);
+      if (parentErr) return shErr('mkdir: ' + display + ': ' + parentErr);
+    } else {
+      // Every missing level is created by the recursive mkdir below; only
+      // an EXISTING non-directory parent is a hard error.
+      const parts = abs.split('/').filter(Boolean);
+      for (let i = 0; i < parts.length - 1; i++) {
+        const parent = '/' + parts.slice(0, i + 1).join('/');
+        let pst = null;
+        try { pst = await ctx.vfs.stat(parent); } catch (e) { pst = null; }
+        if (pst && pst.kind !== 'directory') return shErr('mkdir: ' + display + ': parent is not a directory');
+      }
+    }
+    try {
+      ctx.vfs.assertWritable(abs);
+    } catch (e) {
+      return shErr('mkdir: ' + display + ': ' + writableErrMsg(e));
+    }
+    try {
+      await ctx.vfs.mkdir(abs);
+    } catch (e) {
+      return shErr('mkdir: ' + display + ': ' + writableErrMsg(e));
+    }
+  }
+  const r = shOk('');
+  r.fs = true;
+  return r;
+}
+
+async function shTouch(ctx, args) {
+  const signal = ctx.opts && ctx.opts.signal;
+  const displays = [];
+  for (const t of args) {
+    if (!t.quoted && t.text.charAt(0) === '-' && t.text.length > 1) {
+      return shErr('touch: unsupported option: ' + t.text);
+    }
+    displays.push(t.text);
+  }
+  if (!displays.length) return shErr('usage: touch <file>...');
+
+  for (const display of displays) {
+    throwIfCancelled(signal, 'touch');
+    let abs;
+    try {
+      abs = resolveShellPath(ctx, display);
+    } catch (e) {
+      return shErr('touch: ' + display + ': ' + e.message);
+    }
+    try {
+      await ctx.vfs.stat(abs);
+      continue; // already there (file or directory): left unchanged
+    } catch (e) {
+      if (!e || e.name !== 'NotFoundError') return shErr('touch: ' + display + ': ' + writableErrMsg(e));
+    }
+    const parentErr = await checkParentDir(ctx.vfs, abs);
+    if (parentErr) return shErr('touch: ' + display + ': ' + parentErr);
+    try {
+      ctx.vfs.assertWritable(abs);
+    } catch (e) {
+      return shErr('touch: ' + display + ': ' + writableErrMsg(e));
+    }
+    await ctx.vfs.write(abs, new Uint8Array(0));
+  }
+  const r = shOk('');
+  r.fs = true;
+  return r;
+}
+
+async function shCp(ctx, args) {
+  const signal = ctx.opts && ctx.opts.signal;
+  let recursive = false;
+  const operands = [];
+  for (const t of args) {
+    if (!t.quoted && t.text.charAt(0) === '-' && t.text.length > 1) {
+      if (t.text === '-r' || t.text === '-R') { recursive = true; continue; }
+      if (t.text === '-f') return shErr('cp: -f is not supported (an existing destination is never overwritten)');
+      return shErr('cp: unsupported option: ' + t.text);
+    }
+    operands.push(t.text);
+  }
+  if (operands.length < 2) return shErr('usage: cp [-r|-R] <src>... <dest>');
+
+  const destDisplay = operands[operands.length - 1];
+  let destAbs;
+  try {
+    destAbs = resolveShellPath(ctx, destDisplay);
+  } catch (e) {
+    return shErr('cp: ' + destDisplay + ': ' + e.message);
+  }
+  const sources = operands.slice(0, -1);
+  let destStat = null;
+  try {
+    destStat = await ctx.vfs.stat(destAbs);
+  } catch (e) {
+    if (!e || e.name !== 'NotFoundError') return shErr('cp: ' + destDisplay + ': ' + writableErrMsg(e));
+  }
+  if (sources.length > 1 && (!destStat || destStat.kind !== 'directory')) {
+    return shErr('cp: target ' + destDisplay + ': not a directory (required with multiple sources)');
+  }
+
+  // ---- preflight: validate EVERY source before ANY write happens, so a
+  // bad later source can never leave a half-made earlier copy. Unlike mv,
+  // the SOURCE mount is never asserted writable — cp does not remove it. ----
+  const plan = [];
+  for (const srcDisplay of sources) {
+    throwIfCancelled(signal, 'cp');
+    let srcAbs;
+    try {
+      srcAbs = resolveShellPath(ctx, srcDisplay);
+    } catch (e) {
+      return shErr('cp: ' + srcDisplay + ': ' + e.message);
+    }
+    let srcStat;
+    try {
+      srcStat = await ctx.vfs.stat(srcAbs);
+    } catch (e) {
+      return shErr('cp: ' + srcDisplay + ': ' + (e && e.name === 'NotFoundError' ? 'no such file or directory' : writableErrMsg(e)));
+    }
+    if (srcStat.kind === 'directory' && !recursive) {
+      return shErr('cp: ' + srcDisplay + ': is a directory (use -r)');
+    }
+    let finalAbs = destAbs;
+    if (destStat && destStat.kind === 'directory') {
+      finalAbs = joinAbs(destAbs, baseName(srcAbs));
+    }
+    if (finalAbs === srcAbs) return shErr('cp: ' + srcDisplay + ' and ' + destDisplay + ' are the same file');
+    if (srcStat.kind === 'directory' && finalAbs.startsWith(srcAbs + '/')) {
+      return shErr('cp: cannot copy a directory into itself: ' + srcDisplay);
+    }
+    if (await ctx.vfs.exists(finalAbs)) {
+      return shErr('cp: destination exists: ' + finalAbs);
+    }
+    const parentErr = await checkParentDir(ctx.vfs, finalAbs);
+    if (parentErr) return shErr('cp: ' + destDisplay + ': ' + parentErr);
+    try {
+      ctx.vfs.assertWritable(finalAbs);
+    } catch (e) {
+      return shErr('cp: ' + destDisplay + ': ' + writableErrMsg(e));
+    }
+    plan.push({ srcAbs: srcAbs, srcStat: srcStat, finalAbs: finalAbs });
+  }
+
+  for (const step of plan) {
+    throwIfCancelled(signal, 'cp');
+    const err = step.srcStat.kind === 'directory'
+      ? await cpDirectory(ctx, step.srcAbs, step.finalAbs, signal)
+      : await cpFile(ctx, step.srcAbs, step.finalAbs, signal);
+    if (err) return shErr(err);
+  }
+  const r = shOk('');
+  r.fs = true;
+  return r;
+}
+
+// file → new path: copy and VERIFY the destination landed. No delete step —
+// the source is never modified by a copy.
+async function cpFile(ctx, srcAbs, finalAbs, signal) {
+  throwIfCancelled(signal, 'cp');
+  const bytes = await ctx.vfs.readBytes(srcAbs);
+  throwIfCancelled(signal, 'cp');
+  await ctx.vfs.write(finalAbs, bytes);
+  throwIfCancelled(signal, 'cp');
+  const check = await ctx.vfs.readBytes(finalAbs);
+  if (check.byteLength !== bytes.byteLength || bytesToB64(check) !== bytesToB64(bytes)) {
+    return 'cp: write verification failed for ' + finalAbs;
+  }
+  return null;
+}
+
+// directory → new path: the same bounded pre-scan and explicit destination
+// tree creation as mvDirectory, minus the delete phase — a copy leaves the
+// source tree fully intact by construction.
+async function cpDirectory(ctx, srcAbs, finalAbs, signal) {
+  // ---- pre-scan: complete tree description; every bound is enforced BEFORE
+  // the destination starts to exist ----
+  const files = [];
+  const dirs = []; // pre-order: parents always precede their children
+  let totalBytes = 0;
+  async function scan(abs) {
+    throwIfCancelled(signal, 'cp');
+    const entries = await ctx.vfs.list(abs);
+    for (const e of entries) {
+      if (files.length + dirs.length >= CP_MAX_ENTRIES) {
+        throw new Error('cp: directory exceeds the ' + CP_MAX_ENTRIES + '-entry copy limit');
+      }
+      const child = joinAbs(abs, e.name);
+      if (e.kind === 'directory') {
+        dirs.push(child);
+        await scan(child);
+      } else {
+        const st = await ctx.vfs.stat(child);
+        totalBytes += st.size;
+        if (totalBytes > CP_MAX_TOTAL_BYTES) {
+          throw new Error('cp: directory exceeds the ' + CP_MAX_TOTAL_BYTES + '-byte copy limit');
+        }
+        files.push(child);
+      }
+    }
+  }
+  try {
+    await scan(srcAbs);
+  } catch (e) {
+    if (isCancelledError(e)) throw e;
+    return e.message;
+  }
+
+  // ---- destination tree creation + copy + verify ----
+  const createdDirs = [];
+  const copiedFiles = [];
+  const throwCopyCancelled = () => {
+    if (signal && signal.aborted) {
+      const e = makeCancelledError('cp');
+      e.detail = 'cp: cancelled during copy; created ' + createdDirs.length + ' director(y/ies), copied '
+        + copiedFiles.length + '/' + files.length + ' file(s); partial destination may exist (not rolled back)';
+      throw e;
+    }
+  };
+  try {
+    // The destination root itself is created explicitly — even a completely
+    // empty source directory must materialize as an empty destination.
+    throwCopyCancelled();
+    await ctx.vfs.mkdir(finalAbs);
+    createdDirs.push(finalAbs);
+    for (const d of dirs) {
+      throwCopyCancelled();
+      const target = finalAbs + '/' + d.slice(srcAbs.length + 1);
+      await ctx.vfs.mkdir(target);
+      createdDirs.push(target);
+    }
+    for (const f of files) {
+      throwCopyCancelled();
+      const bytes = await ctx.vfs.readBytes(f);
+      throwCopyCancelled();
+      const destPath = finalAbs + '/' + f.slice(srcAbs.length + 1);
+      await ctx.vfs.write(destPath, bytes);
+      throwCopyCancelled();
+      const check = await ctx.vfs.readBytes(destPath);
+      if (check.byteLength !== bytes.byteLength || bytesToB64(check) !== bytesToB64(bytes)) {
+        return 'cp: write verification failed for ' + destPath
+          + '; partial destination may exist (not rolled back)';
+      }
+      copiedFiles.push(f);
+    }
+  } catch (e) {
+    if (isCancelledError(e)) throw e;
+    return 'cp: destination creation/copy failed (' + (e && e.message ? e.message : String(e))
+      + '); partial destination may exist (not rolled back)';
   }
   return null;
 }
