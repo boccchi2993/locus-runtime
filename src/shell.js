@@ -3098,6 +3098,11 @@ async function shMv(ctx, args) {
   // ANY mutation — a cross-mount move must never create a partial
   // destination only to discover the source is read-only afterwards. ----
   const plan = [];
+  // Destinations already assigned to an earlier source in THIS invocation:
+  // committing one move deletes its source, so a second source aimed at the
+  // same finalAbs would overwrite the first commit AND destroy both
+  // originals — refused here, before anything moves.
+  const claimed = new Set();
   for (const srcDisplay of sources) {
     throwIfCancelled(signal, 'mv');
     let srcAbs;
@@ -3151,6 +3156,10 @@ async function shMv(ctx, args) {
     if (srcStat.kind === 'directory' && finalAbs.startsWith(srcAbs + '/')) {
       return shErr('mv: cannot move a directory into itself: ' + srcDisplay);
     }
+    if (claimed.has(finalAbs)) {
+      return shErr('mv: ' + srcDisplay + ': would overwrite ' + finalAbs + ' (already the target of an earlier source)');
+    }
+    claimed.add(finalAbs);
     if (await ctx.vfs.exists(finalAbs)) {
       return shErr('mv: destination exists: ' + (destStat && destStat.kind !== 'directory' ? finalAbs : destDisplay));
     }

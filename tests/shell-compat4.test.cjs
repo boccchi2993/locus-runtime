@@ -304,6 +304,24 @@ async function run() {
       + JSON.stringify(ws15.files['out/f.txt'] ? dec(ws15.files['out/f.txt']) : 'absent'));
   }
 
+  // ---------- MV-DUP. mv two sources onto one destination (data-loss fix) ----------
+  {
+    // The same collision cp refuses: before the fix, mv committed the first
+    // source (deleting it), then overwrote the destination with the second
+    // source — the first file's content was permanently lost.
+    const ws = new TreeWS({ 'x/f.txt': 'FIRST\n', 'y/f.txt': 'SECOND\n' });
+    await ws.mkdir('out');
+    const mvDup = await exec('bash', 'mv x/f.txt y/f.txt out', ws);
+    check('MV-DUP1 colliding sources refused before any commit', !mvDup.success
+      && mvDup.output.includes('would overwrite')
+      && !(await ws.exists('out/f.txt'))
+      && dec(ws.files['x/f.txt']) === 'FIRST\n'
+      && dec(ws.files['y/f.txt']) === 'SECOND\n', mvDup.output + ' | x/f.txt='
+      + JSON.stringify(ws.files['x/f.txt'] ? dec(ws.files['x/f.txt']) : 'ABSENT')
+      + ' y/f.txt=' + JSON.stringify(ws.files['y/f.txt'] ? dec(ws.files['y/f.txt']) : 'ABSENT')
+      + ' out/f.txt=' + JSON.stringify(ws.files['out/f.txt'] ? dec(ws.files['out/f.txt']) : 'absent'));
+  }
+
   // ---------- CMB. combinations and registry surfacing ----------
   {
     const ws = fixture();
