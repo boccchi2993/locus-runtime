@@ -11,6 +11,7 @@ const SUITES = [
   'shell-compat.test.cjs',
   'shell-compat2.test.cjs',
   'shell-compat3.test.cjs',
+  'shell-compat4.test.cjs',
   'vfs-audit.test.cjs',
   'network.test.cjs',
   'network-runtime.test.cjs',
