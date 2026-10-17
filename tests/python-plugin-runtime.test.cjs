@@ -17,7 +17,8 @@
 //  V1  valid wheel payload accepted, frozen, normalized to an owned copy
 //  V2  payload/key shape rejections (null reset keeps working)
 //  V3  module entry rejections (pluginId, imports)
-//  V4  files+wheels together rejected; neither rejected
+//  V4  files payload rejected (alone or beside wheels); neither payload
+//      rejected
 //  V5  filename must be a plain .whl basename (no slash/backslash/traversal)
 //  V6  format is exactly "python-wheel"
 //  V7  size bounds: integer >= 0, <= package artifact bound
@@ -25,10 +26,9 @@
 //  V9  bytes must be an ArrayBuffer view with byteLength == declared size
 //  V10 own-copy isolation: caller mutation never changes future boots
 //  V11 DataView (non-Uint8Array view) accepted and normalized
-//  V12 legacy files payload still accepted (LEGACY SYNTHETIC COMPOSITION
-//      PATH; same canonical pluginId gate)
+//  V12 files-only source-text payload is now rejected (wheel-only per D10)
 //  V13 canonical plugin identity: pluginId must match EXTENSION_ID_PATTERN
-//      (both payload shapes); valid canonical id accepted
+//      (the gate precedes the payload-shape checks); valid canonical id accepted
 //  V14 wheels non-array rejected with a controlled validation error
 //  V15 zero wheels rejected
 //  V16 multiple wheels rejected (exactly-one-wheel contract)
@@ -41,10 +41,13 @@
 //  W3  metadata size != received bytes -> size mismatch, fail closed
 //  W4  declared smoke import missing -> boot fails closed AFTER cleanup
 //  W5  installer retired after install (micropip.install is the denial)
-//  W6  legacy source-file payload still installs (LEGACY path intact)
+//  W6  files payload at the worker fails the boot closed (wheel-only per
+//      D10; no site-packages write, no READY)
 //  W7  no WebCrypto subtle -> integrity unavailable, fail closed
 //  W8  no wheel payload -> micropip never loads (core boot unchanged)
 //  W9  install command is exactly emfs: + deps=False (offline contract)
+//  WR1 files-only configure AFTER a good wheel payload is refused and
+//      leaves the configured payload untouched (wheel-only migration gate)
 // Run: node tests/python-plugin-runtime.test.cjs
 
 const fs = require('fs');
@@ -137,9 +140,9 @@ expectConfigureThrow('V3c module with non-array imports rejected', { key: 'k', m
 expectConfigureThrow('V3d module with an invalid import name rejected',
   { key: 'k', modules: [wheelModule({ imports: ['bad name!'] })] }, /invalid smoke import name/);
 expectConfigureThrow('V4a files and wheels together rejected',
-  { key: 'k', modules: [wheelModule({ files: { 'x.py': 'x' } })] }, /both files and wheels/);
+  { key: 'k', modules: [wheelModule({ files: { 'x.py': 'x' } })] }, /source-text payloads are no longer supported/);
 expectConfigureThrow('V4b neither files nor wheels rejected',
-  { key: 'k', modules: [{ pluginId: 'p', imports: [] }] }, /invalid extension module entry/);
+  { key: 'k', modules: [{ pluginId: 'p', imports: [] }] }, /exactly one \.whl artifact/);
 for (const bad of ['../evil.whl', 'a/b.whl', 'a\\b.whl', 'no-extension', '.hidden.whl', 'locus_test_plugin-1.0.0-py3-none-any.WHL']) {
   expectConfigureThrow('V5 filename "' + bad + '" rejected',
     { key: 'k', modules: [wheelModule({ wheels: [Object.assign({}, wheelModule().wheels[0], { filename: bad })] })] },
@@ -202,12 +205,27 @@ expectConfigureThrow('V6 wrong format rejected',
     && cryptoNode.createHash('sha256').update(stored).digest('hex') === WHEEL_SHA256, '');
 }
 {
-  // Legacy files payload still configures (LEGACY SYNTHETIC COMPOSITION PATH).
+  // Wheel-only per D10 §6: the files-only source-text payload is refused
+  // outright — the LEGACY SYNTHETIC COMPOSITION PATH is gone.
+  expectConfigureThrow('V12 files-only source-text payload is now rejected (wheel-only per D10)',
+    { key: 'synthetic@1', modules: [{ pluginId: 'synthetic-python-plugin', files: { 'm.py': 'x' }, imports: ['m'] }] },
+    /source-text payloads are no longer supported/);
+}
+{
+  // WR1: the wheel-only migration gate — a files-only payload arriving
+  // AFTER a good wheel configuration is refused AND leaves the previously
+  // configured payload untouched (configure stays all-or-nothing).
   const rt = freshRuntime();
-  rt.configureExtensions({ key: 'synthetic@1', modules: [{ pluginId: 'synthetic-python-plugin', files: { 'm.py': 'x' }, imports: ['m'] }] });
-  check('V12 legacy files payload still accepted on the LEGACY path',
-    rt._extensions.modules[0].files && rt._extensions.modules[0].files['m.py'] === 'x'
-      && !rt._extensions.modules[0].wheels, JSON.stringify(rt._extensions.modules[0]));
+  rt.configureExtensions({ key: 'good@1', modules: [wheelModule()] });
+  let err = null;
+  try { rt.configureExtensions({ key: 'synthetic@1', modules: [{ pluginId: 'synthetic-python-plugin', files: { 'm.py': 'x' }, imports: ['m'] }] }); } catch (e) { err = e; }
+  check('WR1 files-only payload rejected; the previously configured wheel payload is untouched',
+    !!err && /source-text payloads are no longer supported/.test(errText(err))
+      && rt.extensionKey() === 'good@1'
+      && rt._extensions.modules.length === 1
+      && rt._extensions.modules[0].wheels.length === 1
+      && rt._extensions.modules[0].files === undefined,
+    errText(err));
 }
 
 // ------ V13-V17: contract cleanup (canonical id, one-wheel, exact-range own copy) ------
@@ -218,11 +236,13 @@ expectConfigureThrow('V13b pluginId "Bad ID" rejected (canonical identity)',
 expectConfigureThrow('V13c pluginId "Locus-Test-Plugin" (uppercase) rejected',
   { key: 'k', modules: [wheelModule({ pluginId: 'Locus-Test-Plugin' })] }, /pluginId must match/);
 {
-  // The LEGACY synthetic path enforces the SAME canonical plugin identity.
+  // The canonical plugin identity gate runs BEFORE the wheel-only payload
+  // shape check, so a source-text payload with a non-canonical id still
+  // fails with the identity error, not the wheel-only error.
   const rt = freshRuntime();
   let err = null;
   try { rt.configureExtensions({ key: 'k', modules: [{ pluginId: '../evil', files: { 'm.py': 'x' }, imports: ['m'] }] }); } catch (e) { err = e; }
-  check('V13d legacy files payload enforces the same canonical pluginId',
+  check('V13d files payload with a non-canonical pluginId fails the identity gate first',
     !!err && /pluginId must match/.test(errText(err)) && rt._extensions === null, errText(err));
 }
 {
@@ -505,17 +525,20 @@ async function run() {
       calls.some((s) => s === 'unlink:' + scratch), JSON.stringify(calls.slice(-6)));
   }
 
-  // ---------------- W6: legacy files payload ----------------
+  // ---------------- W6: files payload at the worker fails the boot closed ----------------
   {
     const calls = [];
     const posted = [];
     const c = makeWorkerContext(async () => makeFakePy(calls, { importable: ['synthetic_module'] }), posted, calls, { withCrypto: true });
     await postBootstrap(c, [{ pluginId: 'synthetic-python-plugin', files: { 'synthetic_module.py': 'def answer():\n    return 42\n' }, imports: ['synthetic_module'] }]);
     const boot = await waitForBoot(posted);
-    check('W6 LEGACY source-file payload still installs into site-packages',
-      !boot.error && boot.status === 'locked'
-      && calls.some((s) => s.startsWith('writeFile:' + SITE_DIR + '/synthetic_module.py')),
-      boot.error + ' | ' + calls.filter((s) => s.startsWith('writeFile')).join(','));
+    check('W6 files payload at the worker fails the boot closed (wheel-only, no READY)',
+      !!boot.error && /source-text payloads are no longer supported/.test(boot.error)
+        && boot.status !== 'locked',
+      boot.error);
+    check('W6b nothing was written into site-packages after the refusal',
+      !calls.some((s) => s.startsWith('writeFile:')),
+      JSON.stringify(calls.filter((s) => s.startsWith('writeFile'))));
   }
 
   // ---------------- W7: no WebCrypto subtle ----------------
@@ -551,7 +574,7 @@ async function run() {
       !boot.error && boot.status === 'locked', boot.error);
   }
 
-  // ---------------- mixed payload ----------------
+  // ---------------- mixed message with a source-text module ----------------
   {
     const calls = [];
     const posted = [];
@@ -561,18 +584,19 @@ async function run() {
       { pluginId: 'locus-test-plugin', wheels: goodWheels(), imports: ['locus_test_plugin'] },
     ]);
     const boot = await waitForBoot(posted);
-    check('W8c mixed legacy + wheel payload installs both and locks',
-      !boot.error && boot.status === 'locked'
-      && calls.some((s) => s.startsWith('writeFile:' + SITE_DIR + '/synthetic_module.py'))
-      && calls.some((s) => s.indexOf('/tmp/locus-plugin-artifacts/') !== -1),
+    check('W8c mixed message with a source-text module fails the boot closed',
+      !!boot.error && /source-text payloads are no longer supported/.test(boot.error)
+        && boot.status !== 'locked'
+        && !calls.some((s) => s.startsWith('writeFile:')),
       boot.error);
   }
 
   // ---------------- source-contract pins ----------------
   check('S1 micropip install command pins deps=False in the worker source',
     workerSrc.includes('deps=False') && workerSrc.includes('micropip.install("emfs:'), '');
-  check('S2 worker source documents the LEGACY SYNTHETIC COMPOSITION PATH',
-    workerSrc.includes('LEGACY SYNTHETIC COMPOSITION PATH'), '');
+  check('S2 worker source documents the wheel-only protocol (LEGACY path gone)',
+    !workerSrc.includes('LEGACY SYNTHETIC COMPOSITION PATH')
+      && workerSrc.includes('source-text payloads are no longer supported'), '');
   check('S3 plugin wheel scratch root is /tmp only, never a VFS managed root',
     workerSrc.includes("'/tmp/locus-plugin-artifacts/'")
       && !/MANAGED_ROOTS.*locus-plugin-artifacts|locus-plugin-artifacts.*MANAGED_ROOTS/.test(workerSrc), '');

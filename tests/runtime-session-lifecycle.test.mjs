@@ -52,8 +52,9 @@ const { createRuntime } = entry;
 const workerAssets = (await import('../src/worker-assets.js'));
 const WA = { pyWorkerSource: workerAssets.PY_WORKER_SOURCE, grepWorkerSource: workerAssets.GREP_WORKER_SOURCE };
 
+import { wheelPayload } from './helpers/wheel.cjs';
 function payload(key) {
-  return { key, modules: [{ pluginId: 'locus-test-plugin', imports: ['locus_test_plugin'], files: { '__init__.py': 'x = 1\n' } }] };
+  return wheelPayload(key);
 }
 
 // ---------- deterministic parking VFS ----------

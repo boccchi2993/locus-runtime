@@ -927,17 +927,18 @@ function createPythonRuntime(opts) {
   // touched here — swapping the live plugin set is the harness's
   // explicit reset() decision, never a side effect of configuration.
   //
-  // Two module payload shapes exist:
-  //  - LEGACY SYNTHETIC COMPOSITION PATH: { pluginId, files: {rel: text},
-  //    imports } — source text written straight into site-packages by the
-  //    worker. Capability Composition's synthetic proof; NOT Trusted
-  //    Plugin Runtime artifact delivery (V1B retires/isolates it).
+  // One module payload shape exists:
   //  - TRUSTED WHEEL PAYLOAD (TPR v1A): { pluginId, wheels: [{ filename,
   //    format, size, sha256, bytes }], imports } — EXACTLY ONE verified
   //    wheel per module, installed OFFLINE by the worker before READY.
   //    Every invariant a worker cannot be trusted to catch is enforced
   //    HERE: a metadata/bytes disagreement is a trusted-harness bug and
   //    must fail before the boot send, never inside the interpreter.
+  //  The former synthetic composition path ({ pluginId,
+  //  files: {rel: text}, imports } — source text written straight into
+  //  site-packages by the worker) is DELETED per DECISIONS.md D10 §6:
+  //  plugins enter Python only as verified wheel artifacts, and a
+  //  source-text payload is refused here, before any boot send.
   buildExtensions(ext) {
     if (ext === null || ext === undefined) return null;
     if (!ext || typeof ext !== 'object' || typeof ext.key !== 'string' || !ext.key
@@ -952,9 +953,9 @@ function createPythonRuntime(opts) {
       // CANONICAL PLUGIN IDENTITY: the trusted Harness payload may not invent
       // a weaker id schema — every module id must match the SAME pattern the
       // descriptors are validated against (extensions.js keeps its own copy;
-      // equality is pinned by tests/runtime-boundary.test.cjs). Both payload
-      // shapes — LEGACY SYNTHETIC COMPOSITION PATH (files) and TRUSTED
-      // PLUGIN RUNTIME V1A (wheels) — pass through this gate.
+      // equality is pinned by tests/runtime-boundary.test.cjs). This gate
+      // runs BEFORE the payload-shape checks below, so a source-text payload
+      // with a non-canonical id fails here first.
       if (!RUNTIME_PLUGIN_ID_PATTERN.test(m.pluginId)) {
         throw new Error('PythonRuntime.configureExtensions: module pluginId must match '
           + RUNTIME_PLUGIN_ID_PATTERN + ': ' + m.pluginId);
@@ -962,37 +963,24 @@ function createPythonRuntime(opts) {
       if (m.imports.some((n) => !RUNTIME_PY_MODULE_PATTERN.test(String(n)))) {
         throw new Error('PythonRuntime.configureExtensions: invalid smoke import name in module ' + m.pluginId);
       }
-      const hasFiles = m.files !== undefined;
-      const hasWheels = m.wheels !== undefined;
-      if (hasFiles && hasWheels) {
+      if (m.files !== undefined) {
+        // D10 §6 (wheel-only): the former synthetic composition path is
+        // deleted — a source-text payload is refused outright, whether or
+        // not wheels ride along with it.
         throw new Error('PythonRuntime.configureExtensions: module ' + m.pluginId
-          + ' carries both files and wheels payloads');
+          + ' source-text payloads are no longer supported (wheel artifacts only)');
       }
-      if (hasWheels) {
-        // EXACTLY-ONE-WHEEL (Package v1 / TPR v1A contract): one python-wheel
-        // artifact per plugin — no dependency closure, no multi-wheel format.
-        // A wrong shape is a protocol violation and fails here with a
-        // controlled validation error, never as an incidental JS TypeError
-        // bubbling out of the mapping below.
-        if (!Array.isArray(m.wheels) || m.wheels.length !== 1) {
-          throw new Error('PythonRuntime.configureExtensions: module ' + m.pluginId
-            + ' wheels payload must be an array with exactly one .whl artifact');
-        }
-        const wheels = m.wheels.map((w) => validateWheelArtifact(m.pluginId, w));
-        return Object.freeze({ pluginId: m.pluginId, imports: m.imports.slice(), wheels: Object.freeze(wheels.map(Object.freeze)) });
+      // EXACTLY-ONE-WHEEL (Package v1 / TPR v1A contract): one python-wheel
+      // artifact per plugin — no dependency closure, no multi-wheel format.
+      // A wrong shape is a protocol violation and fails here with a
+      // controlled validation error, never as an incidental JS TypeError
+      // bubbling out of the mapping below.
+      if (!Array.isArray(m.wheels) || m.wheels.length !== 1) {
+        throw new Error('PythonRuntime.configureExtensions: module ' + m.pluginId
+          + ' wheels payload must be an array with exactly one .whl artifact');
       }
-      if (!hasFiles || typeof m.files !== 'object' || Array.isArray(m.files)) {
-        throw new Error('PythonRuntime.configureExtensions: invalid extension module entry');
-      }
-      const files = {};
-      for (const rel of Object.keys(m.files)) {
-        if (typeof m.files[rel] !== 'string') {
-          throw new Error('PythonRuntime.configureExtensions: module ' + m.pluginId
-            + ' payload file ' + rel + ' must be UTF-8 text');
-        }
-        files[rel] = m.files[rel];
-      }
-      return Object.freeze({ pluginId: m.pluginId, files: files, imports: m.imports.slice() });
+      const wheels = m.wheels.map((w) => validateWheelArtifact(m.pluginId, w));
+      return Object.freeze({ pluginId: m.pluginId, imports: m.imports.slice(), wheels: Object.freeze(wheels.map(Object.freeze)) });
     });
     return Object.freeze({ key: ext.key, modules: Object.freeze(modules) });
   },

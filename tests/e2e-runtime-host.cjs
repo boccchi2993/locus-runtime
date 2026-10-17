@@ -24,12 +24,15 @@
 const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const {
   closeChrome, connectToTarget, launchChrome, waitForCdp,
   waitForPageTarget, waitForRuntimeCondition,
 } = require('./helpers/chrome.cjs');
 
 const HOST_URL = process.env.E2E_HOST_URL || 'http://127.0.0.1:4173/tests/runtime-host.html';
+const WHEEL_PATH = path.join(__dirname, 'fixtures/capability-package/minimal',
+  'plugins/locus-test-plugin/artifacts/locus_test_plugin-1.0.0-py3-none-any.whl');
 
 let passed = 0, failed = 0;
 function check(name, cond, detail) {
@@ -168,6 +171,16 @@ async function main() {
     // The small settle window before the reset only bounds the NEGATIVE
     // check (nothing applied yet) — the ordering proof itself lives in the
     // deterministic Node suites (runtime-session-lifecycle).
+    // The prepare payload is the fixture wheel (TPR v1A wheel-only per D10):
+    // it must be CONFIGURE-valid so the prepare genuinely stages and waits.
+    const wheelBytes = await fs.readFile(WHEEL_PATH);
+    const wheelB64 = wheelBytes.toString('base64');
+    const wheelSha = crypto.createHash('sha256').update(wheelBytes).digest('hex');
+    await evaluate(cdp, 'window.__hostWheel = (function () {'
+      + ' var bin = atob(' + JSON.stringify(wheelB64) + ');'
+      + ' var bytes = new Uint8Array(bin.length);'
+      + ' for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);'
+      + ' return bytes; })(); "wheel-set"', 15000);
     const L = await evaluate(cdp, `(async () => {
       const h = window.__host;
       const pk = h.makeParkingVfs();
@@ -185,7 +198,9 @@ async function main() {
       const busyWhileParked = pk.session.status().busyExecutions;
       let prepareApplied = false;
       const pp = pk.session.prepare({ python: { key: 'env-live', modules: [
-        { pluginId: 'locus-live-plugin', imports: ['locus_live_plugin'], files: { '__init__.py': 'x = 1\\n' } },
+        { pluginId: 'locus-test-plugin', imports: ['locus_test_plugin'], wheels: [{
+          filename: 'locus_test_plugin-1.0.0-py3-none-any.whl', format: 'python-wheel',
+          size: ${wheelBytes.length}, sha256: ${JSON.stringify(wheelSha)}, bytes: window.__hostWheel }] },
       ] } }).then((r) => { prepareApplied = true; return r; }).catch((e) => e);
       await new Promise((r) => setTimeout(r, 25));
       const prepareWaited = prepareApplied === false && pk.session.status().extensionKey === null;
