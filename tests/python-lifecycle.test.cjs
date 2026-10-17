@@ -50,16 +50,14 @@ process.on('unhandledRejection', (e) => { console.error('UNHANDLED:', e && e.sta
 const tick = () => new Promise((r) => setTimeout(r, 10));
 
 // A payload matching the documented PluginPayload shape (extensions.js
-// identity rules) with LEGACY synthetic files — enough for configure-time
-// validation; no worker ever sees it in this suite.
+// identity rules) as a TPR v1A wheel payload (the fixture wheel; wheel-only
+// per DECISIONS.md D10 §6) — enough for configure-time validation; no
+// worker ever sees it in this suite.
+const { wheelModule } = require('./helpers/wheel.cjs');
 function payload(key, pluginId) {
   return {
     key: key,
-    modules: [{
-      pluginId: pluginId || 'locus-test-plugin',
-      imports: ['locus_test_plugin'],
-      files: { '__init__.py': 'x = 1\n' },
-    }],
+    modules: [wheelModule(pluginId ? { pluginId } : undefined)],
   };
 }
 

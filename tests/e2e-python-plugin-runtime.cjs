@@ -34,8 +34,8 @@
 //  I4  bytes tampered under a correct declared hash -> integrity failure
 //  I5  correct hash but not a wheel -> offline install failure, no READY
 //  S2  declared import missing -> smoke failure, no READY; S3 recovery
-//  L1  LEGACY source-file payload still boots and imports (explicitly
-//      NOT Trusted Plugin Runtime artifact delivery)
+//  L1  LEGACY source-file payload is rejected at configure time (wheel-only
+//      per D10; the configured wheel payload stays untouched)
 //  U2  post-READY package authority: micropip remote install / index
 //      install / local emfs install and pyodide.loadPackage* are all dead
 //      with ZERO requests; F04a user network denial intact
@@ -421,16 +421,16 @@ async function main() {
     check('C1c clean rebuild after cancellation answers 42 (no late zombie READY)',
       c1b.ok && /ANSWER 42/.test(c1b.result.stdout || ''), JSON.stringify(c1b).slice(0, 250));
 
-    // ---- L-series: LEGACY source path still works ----
+    // ---- L-series: the LEGACY source path is refused (wheel-only per D10) ----
     const l1cfg = await evaluate(cdp,
       'window.__tprConfigure("synthetic-python-plugin@1", [{ pluginId: "synthetic-python-plugin",'
       + ' files: { "locus_legacy_probe.py": "def probe():\\n    return 7\\n" }, imports: ["locus_legacy_probe"] }])', 30000);
-    await evaluate(cdp, 'window.__pyrt.reset(); "reset"', 15000);
-    const l1 = await evaluate(cdp,
-      'window.__tprRun("import locus_legacy_probe\\nprint(\'LEGACY\', locus_legacy_probe.probe())")', 240000);
-    check('L1 LEGACY source-file payload still boots and imports (not TPR delivery)',
-      l1cfg.ok === true && l1.ok && /LEGACY 7/.test(l1.result.stdout || ''),
-      JSON.stringify(l1).slice(0, 250));
+    check('L1 LEGACY source-file payload is rejected at configure time (wheel-only)',
+      l1cfg.ok === false && /source-text payloads are no longer supported/.test(l1cfg.error || ''),
+      JSON.stringify(l1cfg));
+    check('L1b the rejected files configuration never replaced the good wheel payload',
+      (await evaluate(cdp, 'window.__pyrt.extensionKey()', 15000)) === 'locus-test-plugin@1.0.0',
+      JSON.stringify(await evaluate(cdp, 'window.__pyrt.extensionKey()', 15000)));
 
     // ---- U-series: post-READY package authority ----
     // Re-establish the wheel payload interpreter for the authority probes.

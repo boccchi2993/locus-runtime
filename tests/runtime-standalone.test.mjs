@@ -162,8 +162,9 @@ function attachControlledWorker(rt) {
     },
   };
 }
+import { wheelPayload } from './helpers/wheel.cjs';
 function payload(key) {
-  return { key, modules: [{ pluginId: 'locus-test-plugin', imports: ['locus_test_plugin'], files: { '__init__.py': 'x = 1\n' } }] };
+  return wheelPayload(key);
 }
 
 {
