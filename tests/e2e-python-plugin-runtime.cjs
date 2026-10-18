@@ -19,6 +19,8 @@
 //     across boots, resets, crashes and every post-READY escape probe.
 //
 //  E1  cold boot with a wheel payload: offline install + smoke + READY
+//  E1b first run carries no phantom plugin-artifact mkdir (scratch parent
+//      cleanup; stdout and res.mkdirs clean)
 //  E2  user Python imports the plugin; answer() == 42; pandas intact;
 //      worker-local file compute untouched
 //  E3  ORACLE: boot+run fetched exactly the pinned asset set; ZERO other
@@ -276,6 +278,16 @@ async function main() {
       e1.ok && /ANSWER 42/.test(e1.result.stdout || '') && !e1.result.error,
       JSON.stringify(e1).slice(0, 300));
     console.log('# E1 stdout: ' + JSON.stringify((e1.result && e1.result.stdout || '').slice(-120)));
+    // The wheel install's scratch dir (/tmp/locus-plugin-artifacts) is created
+    // before READY; a leftover parent used to surface on the FIRST python run
+    // as a phantom committed dir — res.mkdirs carried it and the runPython
+    // tool printed "[mkdir: /tmp/locus-plugin-artifacts]". The runtime-level
+    // result must carry no trace of it (the tool line is a pure projection of
+    // res.mkdirs; the formatting itself is covered by the vfs-audit DC-series).
+    check('E1b first run: no phantom plugin-artifact mkdir in stdout or mkdirs',
+      (e1.result.stdout || '').indexOf('locus-plugin-artifacts') === -1
+      && Array.isArray(e1.result.mkdirs) && e1.result.mkdirs.length === 0,
+      JSON.stringify({ stdoutTail: (e1.result.stdout || '').slice(-160), mkdirs: e1.result.mkdirs }));
 
     const e2 = await evaluate(cdp,
       'window.__tprRun("import pandas as pd, json\\nimport locus_test_plugin\\nopen(\'/tmp/tpr-probe.txt\', \'w\').write(\'ok\')\\nprint(\'DF\', int(pd.DataFrame({\'a\': [2, 20]}).a.sum()))\\nprint(\'FILE\', open(\'/tmp/tpr-probe.txt\').read())\\nprint(\'JSON\', json.dumps({\'v\': 42}))")', 120000);
