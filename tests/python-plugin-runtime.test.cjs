@@ -36,10 +36,15 @@
 //      (byteOffset + byteLength respected, caller mutation inert)
 //  W1  wheel install lifecycle order (pandas -> micropip -> verify -> write
 //      -> emfs install deps=False -> unlink/rmdir -> smoke -> neuter)
+//  W1g parent scratch dir attempted after the sha dir (no
+//      /tmp/locus-plugin-artifacts residue -> no phantom [mkdir: ...] report)
 //  W2  tampered bytes (same size, wrong digest) -> sha256 mismatch, no
 //      write, no install, no smoke, no READY
 //  W3  metadata size != received bytes -> size mismatch, fail closed
 //  W4  declared smoke import missing -> boot fails closed AFTER cleanup
+//  W4c parent scratch dir also cleaned when the smoke import fails
+//  W4d two-wheel boot: per-wheel parent cleanup attempts, both sha dirs
+//      removed, swallowed parent-rmdir failures never break the boot
 //  W5  installer retired after install (micropip.install is the denial)
 //  W6  files payload at the worker fails the boot closed (wheel-only per
 //      D10; no site-packages write, no READY)
@@ -465,6 +470,18 @@ async function run() {
     check('W1e scratch wheel removed after install (empty dir too)',
       calls.some((s) => s === 'unlink:' + scratch)
       && calls.some((s) => s === 'rmdir:/tmp/locus-plugin-artifacts/' + WHEEL_SHA256), '');
+    // mkdirTree creates the parent scratch dir too (/tmp/locus-plugin-artifacts);
+    // leaving it behind made the FIRST python run report it as a phantom
+    // created dir ("[mkdir: /tmp/locus-plugin-artifacts]"). The cleanup must
+    // attempt the parent as well, after its child. The fake FS never
+    // materializes the parent entry, so this rmdir throws (swallowed) — which
+    // also proves a failing parent rmdir cannot break the boot.
+    const shaRmdirAt = calls.indexOf('rmdir:/tmp/locus-plugin-artifacts/' + WHEEL_SHA256);
+    const parentRmdirAt = calls.indexOf('rmdir:/tmp/locus-plugin-artifacts');
+    check('W1g parent scratch dir removed after the sha dir (no residue, no [mkdir: ...] phantom)',
+      shaRmdirAt !== -1 && parentRmdirAt > shaRmdirAt
+      && !pyRef._files.has('/tmp/locus-plugin-artifacts/' + WHEEL_SHA256),
+      JSON.stringify(calls.filter((s) => s.startsWith('rmdir'))));
     check('W1f smoke import ran for the declared import',
       calls.some((s) => s === 'runPython:import locus_test_plugin'), order.slice(-300));
     check('W5 installer retired before READY (micropip.install is the denial)',
@@ -523,6 +540,51 @@ async function run() {
       !!boot.error && /smoke import failed for module_that_does_not_exist_7f91/.test(boot.error), boot.error);
     check('W4b scratch cleaned up even when the smoke import fails',
       calls.some((s) => s === 'unlink:' + scratch), JSON.stringify(calls.slice(-6)));
+    const shaRmdirAt4 = calls.indexOf('rmdir:/tmp/locus-plugin-artifacts/' + WHEEL_SHA256);
+    const parentRmdirAt4 = calls.indexOf('rmdir:/tmp/locus-plugin-artifacts');
+    check('W4c parent scratch dir also removed when the smoke import fails',
+      shaRmdirAt4 !== -1 && parentRmdirAt4 > shaRmdirAt4,
+      JSON.stringify(calls.filter((s) => s.startsWith('rmdir'))));
+  }
+
+  // ---------------- W4d: two wheels, per-wheel parent cleanup ----------------
+  // Two modules (the real harness shape for multi-wheel sets: exactly one
+  // wheel each). Each wheel's cleanup must attempt the parent scratch dir on
+  // its own — for the second wheel the parent was recreated by its mkdirTree,
+  // so a single shared cleanup would miss it. The fake FS never materializes
+  // the parent entry, so every parent rmdir throws and must be swallowed:
+  // the boot still locks and both sha dirs are gone afterwards. (A parent
+  // rmdir failing with ENOTEMPTY — a non-empty parent — is not reachable in
+  // the sequential install flow: every wheel unlinks its own file and rmdirs
+  // its own sha dir before the next wheel runs, so the parent is always empty
+  // at that point with the fix in place.)
+  {
+    const calls = [];
+    const posted = [];
+    let pyRef = null;
+    const secondBytes = WHEEL_BYTES.slice();
+    secondBytes[3] ^= 0x5a;
+    const secondSha = cryptoNode.createHash('sha256').update(secondBytes).digest('hex');
+    const wheelTwo = [{
+      filename: 'locus_test_plugin-1.0.1-py3-none-any.whl', format: 'python-wheel',
+      size: secondBytes.byteLength, sha256: secondSha, bytes: secondBytes,
+    }];
+    const c = makeWorkerContext(async () => { pyRef = makeFakePy(calls, { importable: ['locus_test_plugin'] }); return pyRef; }, posted, calls, { withCrypto: true });
+    await postBootstrap(c, [
+      { pluginId: 'locus-test-plugin', wheels: goodWheels(), imports: ['locus_test_plugin'] },
+      { pluginId: 'locus-test-plugin-two', wheels: wheelTwo, imports: ['locus_test_plugin'] },
+    ]);
+    const boot = await waitForBoot(posted);
+    check('W4d two-wheel boot locks with per-wheel parent scratch cleanup',
+      !boot.error && boot.status === 'locked'
+      && calls.some((s) => s === 'rmdir:/tmp/locus-plugin-artifacts/' + WHEEL_SHA256)
+      && calls.some((s) => s === 'rmdir:/tmp/locus-plugin-artifacts/' + secondSha)
+      && calls.filter((s) => s === 'rmdir:/tmp/locus-plugin-artifacts').length === 2
+      && calls.indexOf('rmdir:/tmp/locus-plugin-artifacts') > calls.indexOf('rmdir:/tmp/locus-plugin-artifacts/' + WHEEL_SHA256)
+      && calls.lastIndexOf('rmdir:/tmp/locus-plugin-artifacts') > calls.indexOf('rmdir:/tmp/locus-plugin-artifacts/' + secondSha)
+      && !pyRef._files.has('/tmp/locus-plugin-artifacts/' + WHEEL_SHA256)
+      && !pyRef._files.has('/tmp/locus-plugin-artifacts/' + secondSha),
+      JSON.stringify({ bootError: boot.error, rmdirs: calls.filter((s) => s.startsWith('rmdir')) }));
   }
 
   // ---------------- W6: files payload at the worker fails the boot closed ----------------
