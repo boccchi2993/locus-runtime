@@ -26,7 +26,7 @@ function binding(overrides) {
     scheme: 'Bearer',
     origin: ORIGIN,
     pathPrefix: PREFIX,
-    status: 'connected',
+    state: 'connected',
   }, overrides);
 }
 
@@ -281,7 +281,7 @@ async function run() {
   sweep.push(collect(e5 && e5.message));
 
   resetNet();
-  const creds5b = makeCredentials([binding({ status: 'needs-connection' })]);
+  const creds5b = makeCredentials([binding({ state: 'needs-connection' })]);
   const e5b = await netError(() => M.NetworkRuntime.request({
     method: 'GET', url: BOUND_URL,
     headers: { Authorization: 'Bearer $' + NAME },
@@ -295,7 +295,7 @@ async function run() {
   sweep.push(collect(e5b && e5b.message));
 
   resetNet();
-  const creds5c = makeCredentials([binding({ status: 'needs-reconfirm' })]);
+  const creds5c = makeCredentials([binding({ state: 'needs-reconfirm' })]);
   const e5c = await netError(() => M.NetworkRuntime.request({
     method: 'GET', url: BOUND_URL,
     headers: { Authorization: 'Bearer $' + NAME },
@@ -544,6 +544,51 @@ async function run() {
       err && err.networkCode);
     sweep.push(collect(err && err.message));
   }
+
+  // ---------- NC17: a binding without a valid state invalidates the whole list ----------
+  const missingState = binding();
+  delete missingState.state;
+  const stateFailures = [
+    ['NC17 missing state', missingState],
+    ['NC17b state "active"', binding({ state: 'active' })],
+    ['NC17c state null', binding({ state: null })],
+  ];
+  for (const [label, bad] of stateFailures) {
+    resetNet();
+    const creds = makeCredentials([bad]);
+    const allow = makeAllowPort();
+    const err = await netError(() => M.NetworkRuntime.request({
+      method: 'POST', url: BOUND_URL,
+      headers: { Authorization: 'Bearer $' + NAME },
+      body: '{"x":1}',
+      credentials: creds,
+      authorization: allow,
+    }));
+    check(label, isCode(err, 'network_credential_unavailable') && calls.length === 0
+      && creds.valueCalls.length === 0 && allow.asks.length === 0,
+      (err && err.networkCode) + ' sent=' + calls.length
+      + ' value=' + creds.valueCalls.length + ' asks=' + allow.asks.length);
+    sweep.push(collect(err && err.message));
+  }
+
+  // ---------- NC18: the legacy `status` field is not a fallback ----------
+  resetNet();
+  const legacy = binding({ status: 'connected' });
+  delete legacy.state;
+  const creds18 = makeCredentials([legacy]);
+  const allow18 = makeAllowPort();
+  const e18 = await netError(() => M.NetworkRuntime.request({
+    method: 'POST', url: BOUND_URL,
+    headers: { Authorization: 'Bearer $' + NAME },
+    body: '{"x":1}',
+    credentials: creds18,
+    authorization: allow18,
+  }));
+  check('NC18 status-only binding refused (no legacy fallback)',
+    isCode(e18, 'network_credential_unavailable') && calls.length === 0
+    && creds18.valueCalls.length === 0 && allow18.asks.length === 0,
+    (e18 && e18.networkCode) + ' sent=' + calls.length);
+  sweep.push(collect(e18 && e18.message));
 
   // ---------- NC12: redirects are refused for credentialed requests ----------
   resetNet();

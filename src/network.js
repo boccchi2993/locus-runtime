@@ -139,8 +139,13 @@ const NetworkRuntime = {
   //                  plain-text action/resource/policyKey and NO identity
   //    credentials   optional C3 credential port { bindings(), value(name) }
   //                  (both calls may return Promises): bindings() lists the
-  //                  user-bound credential headers, value(name) resolves ONE
-  //                  name to its secret AFTER validation and approval.
+  //                  user-bound credential headers, each
+  //                  { name, origin, pathPrefix, header, scheme, state }
+  //                  with state 'connected' | 'needs-connection' |
+  //                  'needs-reconfirm' — a binding missing state, or with
+  //                  any other value, invalidates the whole list;
+  //                  value(name) resolves ONE name to its secret AFTER
+  //                  validation and approval.
   //    timeoutMs      direct-attempt deadline (default 60s)
   //    relayTimeoutMs relay-attempt deadline (default 45s)
   //  }
@@ -894,6 +899,10 @@ async function planCredentialUse(port, parsed, headers) {
   if (!Array.isArray(bindings)) {
     throw makeNetError('network_credential_unavailable', 'credential bindings are not available');
   }
+  // Every binding must carry a valid `state` (spec C3 §4.2: 'connected',
+  // 'needs-connection' or 'needs-reconfirm'); a missing or unknown state —
+  // including the legacy `status` spelling, which is never read — makes the
+  // WHOLE list invalid (fail closed).
   for (const b of bindings) {
     if (!b || typeof b !== 'object' || Array.isArray(b)
       || typeof b.name !== 'string' || !CREDENTIAL_NAME_PATTERN.test(b.name)
@@ -901,7 +910,8 @@ async function planCredentialUse(port, parsed, headers) {
       || (b.scheme !== null && b.scheme !== 'Bearer')
       || typeof b.origin !== 'string' || !b.origin
       || typeof b.pathPrefix !== 'string'
-      || (b.status !== undefined && typeof b.status !== 'string')) {
+      || (b.state !== 'connected' && b.state !== 'needs-connection'
+        && b.state !== 'needs-reconfirm')) {
       throw makeNetError('network_credential_unavailable', 'credential bindings are not available');
     }
   }
@@ -928,11 +938,11 @@ async function planCredentialUse(port, parsed, headers) {
     if (!binding) {
       throw makeNetError('network_credential_unknown', 'unknown credential: ' + ref.name);
     }
-    if (binding.status === 'needs-connection') {
+    if (binding.state === 'needs-connection') {
       throw makeNetError('network_credential_not_connected',
         'credential ' + binding.name + ' is not connected — connect it in Settings → Capabilities');
     }
-    if (binding.status === 'needs-reconfirm') {
+    if (binding.state === 'needs-reconfirm') {
       throw makeNetError('network_credential_needs_reconfirm',
         'credential ' + binding.name + ' needs reconfirmation — confirm it in Settings → Capabilities');
     }
