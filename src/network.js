@@ -47,6 +47,11 @@
 //    Proxy-Authorization) belong to the origin they were granted for.
 //    The relay strips them before dispatching a cross-origin redirect
 //    hop; a stripped credential never returns on a later hop.
+//  - user-bound credential VALUES (C3) never enter this file as text:
+//    an optional spec.credentials port resolves `$NAME` / `${NAME}`
+//    references in header values (validate → approve → resolve ONCE →
+//    send). A credentialed request never follows a redirect, and the
+//    value is redacted from the response before it leaves the runtime.
 //
 //  Approval integration: side-effecting methods are the Approval
 //  Framework's first production consumer — the Harness constructs
@@ -132,6 +137,10 @@ const NetworkRuntime = {
   //    authorization { request(req, opts) → { outcome, scope } }  — the
   //                  execution authorization port (§3.5); req carries the
   //                  plain-text action/resource/policyKey and NO identity
+  //    credentials   optional C3 credential port { bindings(), value(name) }
+  //                  (both calls may return Promises): bindings() lists the
+  //                  user-bound credential headers, value(name) resolves ONE
+  //                  name to its secret AFTER validation and approval.
   //    timeoutMs      direct-attempt deadline (default 60s)
   //    relayTimeoutMs relay-attempt deadline (default 45s)
   //  }
@@ -163,6 +172,16 @@ const NetworkRuntime = {
       throw new Error('GET/HEAD requests cannot carry a body');
     }
 
+    // ---- C3 credential plan (pure validation — no approval, no send):
+    // `$NAME` / `${NAME}` references in header values are checked against
+    // the port's bindings, and a literal value for a bound header on its
+    // own target is refused. Everything here is decided BEFORE backend
+    // selection and approval; the credential VALUE does not exist yet.
+    const credentialPort = normalizeCredentialsPort(opts.credentials);
+    const cred = credentialPort
+      ? await planCredentialUse(credentialPort, parsed, headers)
+      : null;
+
     // ---- backend selection + SSRF pre-check BEFORE the approval: both
     // are pure, and the chosen backend is FINAL. After a request is in
     // flight it is never re-routed or re-sent.
@@ -185,9 +204,14 @@ const NetworkRuntime = {
           'side-effecting network requests require an execution authorization port (none is wired)');
       }
       const summary = method + ' ' + canonicalOrigin + parsed.pathname;
-      const detail = body && body.byteLength
+      let detail = body && body.byteLength
         ? 'Request body size: ' + formatByteSize(body.byteLength)
         : null;
+      // C3: name the credential on the approval card — never its value
+      // (the value does not exist yet and is resolved only after approval).
+      if (cred) {
+        detail = (detail ? detail + '\n' : '') + 'Uses credential: ' + cred.name;
+      }
       const decision = await authorization.request({
         kind: 'permission',
         action: { type: 'network-request', summary: summary, detail: detail },
@@ -201,6 +225,10 @@ const NetworkRuntime = {
         if (decision.outcome === 'cancelled') throw makeNetCancelledError();
         throw makeNetError('network_denied', 'network request denied by user');
       }
+      // C3: the ONE value() call happens after the approval decision and
+      // substitutes the real header value in place.
+      let credentialValue = null;
+      if (cred) credentialValue = await resolveCredentialValue(cred, headers);
       // Safe preparation (post-approval, pre-side-effect): re-check the
       // request bounds, then the FINAL task-liveness check.
       if (body && body.byteLength > NETWORK_MAX_REQUEST_BYTES) {
@@ -209,10 +237,18 @@ const NetworkRuntime = {
       }
       throwIfSignalAborted(externalSignal);
       // NO await between here and the start of the request.
+      const result = await this._perform(backend, readLike, method, targetUrl,
+        parsed, headers, body, externalSignal, opts, !!cred);
+      return cred ? redactCredentialFromResult(result, credentialValue) : result;
     }
 
-    return await this._perform(backend, readLike, method, targetUrl, parsed,
-      headers, body, externalSignal, opts);
+    // C3 read-like requests skip approval; the value is still resolved
+    // exactly once, right before the send.
+    let credentialValue = null;
+    if (cred) credentialValue = await resolveCredentialValue(cred, headers);
+    const result = await this._perform(backend, readLike, method, targetUrl,
+      parsed, headers, body, externalSignal, opts, !!cred);
+    return cred ? redactCredentialFromResult(result, credentialValue) : result;
   },
 
   // Read-like GET convenience wrapper (v0 entry point, unchanged
@@ -230,12 +266,14 @@ const NetworkRuntime = {
   // Perform the request on the pre-selected backend. Read-like requests
   // may fall back browser → relay ONCE on a genuine network failure;
   // side-effecting requests never do (zero automatic retries).
+  // `credentialed` (C3): the request carries a user-bound credential —
+  // redirects are refused on every leg (never followed, never handed on).
   async _perform(backend, readLike, method, targetUrl, parsed, headers, body,
-    externalSignal, opts) {
+    externalSignal, opts, credentialed) {
     if (backend === 'browser-direct') {
       try {
         return await this._direct(method, targetUrl, headers, body,
-          externalSignal, opts.timeoutMs || DIRECT_TIMEOUT_MS);
+          externalSignal, opts.timeoutMs || DIRECT_TIMEOUT_MS, credentialed);
       } catch (e) {
         // FALLBACK BOUNDARY: only a failure of the initial fetch()
         // transport invocation itself (DirectTransportFailure) may hand a
@@ -263,12 +301,14 @@ const NetworkRuntime = {
       // Legacy GET ?url= form for headerless GET requests (kept for wire
       // compatibility); everything else — headerless HEAD, GET/HEAD with
       // headers and all side-effecting methods — uses the POST /fetch
-      // JSON envelope, which preserves the method exactly.
-      if (method === 'GET' && !Object.keys(headers).length) {
+      // JSON envelope, which preserves the method exactly. A credentialed
+      // request always uses the envelope: the ?url= form cannot carry the
+      // redirect:'manual' instruction.
+      if (method === 'GET' && !Object.keys(headers).length && !credentialed) {
         return await this._relayGet(targetUrl, externalSignal, opts.relayTimeoutMs);
       }
       return await this._relayRequest(method, targetUrl, headers, body,
-        externalSignal, opts.relayTimeoutMs);
+        externalSignal, opts.relayTimeoutMs, credentialed);
     } catch (e) {
       if (e && e.networkCode) {
         // Classified (relay structured error / timeout / cap / …): a
@@ -286,7 +326,7 @@ const NetworkRuntime = {
     }
   },
 
-  async _direct(method, url, headers, body, externalSignal, timeoutMs) {
+  async _direct(method, url, headers, body, externalSignal, timeoutMs, credentialed) {
     const readLike = isReadLikeMethod(method);
     if (externalSignal && externalSignal.aborted) throw makeNetCancelledError();
     const controller = new AbortController();
@@ -305,8 +345,10 @@ const NetworkRuntime = {
           // Side-effecting requests must not follow redirects: the browser
           // reports redirect:'manual' as an opaque response whose target
           // cannot be inspected, so it is blocked outright instead of
-          // replaying an approved body somewhere else.
-          redirect: readLike ? 'follow' : 'manual',
+          // replaying an approved body somewhere else. C3: the same applies
+          // to a credentialed READ — an opaqueredirect/3xx is refused
+          // below instead of following it with the credential attached.
+          redirect: credentialed || !readLike ? 'manual' : 'follow',
           credentials: 'omit', // anonymous by construction — never send ambient cookies
           headers: Object.keys(headers || {}).length ? headers : undefined,
           body: readLike ? undefined : (body || undefined),
@@ -321,6 +363,13 @@ const NetworkRuntime = {
       // A Response exists. From here on NO backend fallback is possible:
       // the request reached the HTTP layer, so any failure is a
       // post-Response failure of THIS attempt.
+      // C3: a credentialed request never follows a redirect — the body is
+      // discarded unread and the refusal is explicit.
+      if (credentialed && (res.type === 'opaqueredirect' || isRedirectStatus(res.status))) {
+        discardBodyQuietly(res);
+        throw makeNetError('network_credential_redirect_refused',
+          'credentialed request does not follow redirects');
+      }
       if (!readLike && isRedirectResponse(res)) {
         throw makeNetError('network_redirect_blocked',
           'redirect blocked: side-effecting requests cannot be redirected to another origin');
@@ -359,9 +408,13 @@ const NetworkRuntime = {
 
   // Relay request for everything else: the POST /fetch JSON envelope
   // carries method/target/headers/body; the relay re-validates
-  // everything server-side (docs/NETWORK-RUNTIME.md).
-  async _relayRequest(method, url, headers, body, externalSignal, timeoutMs) {
+  // everything server-side (docs/NETWORK-RUNTIME.md). C3: a credentialed
+  // request tells the relay redirect:"manual" — and refuses the response
+  // anyway if the relay followed a hop (older relay without the field).
+  async _relayRequest(method, url, headers, body, externalSignal, timeoutMs,
+    credentialed) {
     const envelope = { method: method, url: url, headers: headers || {} };
+    if (credentialed) envelope.redirect = 'manual';
     if (body && body.byteLength) envelope.bodyBase64 = bytesToBase64(body);
     return fetchWithDeadline(this.relayPath, {
       method: 'POST',
@@ -369,7 +422,7 @@ const NetworkRuntime = {
       body: JSON.stringify(envelope),
       credentials: 'omit',
     }, timeoutMs || RELAY_CLIENT_TIMEOUT_MS, externalSignal, async (res, signal) => {
-      return await consumeRelayResponse(res, signal, url);
+      return await consumeRelayResponse(res, signal, url, credentialed);
     });
   },
 };
@@ -379,7 +432,7 @@ const NetworkRuntime = {
 //  final-URL exposure, bounded byte read) — normalized ONCE here so
 //  the relay's wire shape never leaks to consumers.
 // ------------------------------------------------------------
-async function consumeRelayResponse(res, signal, targetUrl) {
+async function consumeRelayResponse(res, signal, targetUrl, credentialed) {
   // The relay's OWN failures (bad URL, unsupported method, private
   // target, timeout, size cap, redirect block) are marked with
   // X-Locus-Relay-Error and carry a JSON {error:{code, message}} body —
@@ -397,8 +450,20 @@ async function consumeRelayResponse(res, signal, targetUrl) {
     }
     throw makeNetError(code || 'network_relay_failed', 'network request failed: ' + msg);
   }
+  // C3: a credentialed relay request was dispatched with redirect:"manual".
+  // If the relay followed a hop anyway (X-Locus-Final-URL differs) or the
+  // upstream answered 3xx, the response body is DISCARDED unread — even a
+  // relay without the redirect field can never hand redirect content on.
+  const finalUrlHeader = res.headers.get('x-locus-final-url');
+  if (credentialed
+    && ((finalUrlHeader != null && finalUrlHeader !== targetUrl)
+      || isRedirectStatus(res.status))) {
+    discardBodyQuietly(res);
+    throw makeNetError('network_credential_redirect_refused',
+      'credentialed request does not follow redirects');
+  }
   const headersAndList = headersFromResponse(res.headers);
-  const finalUrl = res.headers.get('x-locus-final-url') || targetUrl;
+  const finalUrl = finalUrlHeader || targetUrl;
   assertFinalScheme(finalUrl);
   return {
     status: res.status,
@@ -759,6 +824,224 @@ function isNetworkFailure(e) {
 // non-browser runtimes surface the plain 3xx.
 function isRedirectResponse(res) {
   return res.status === 0 || (res.status >= 300 && res.status < 400);
+}
+
+// Plain 3xx status check (C3 credential redirect refusal).
+function isRedirectStatus(status) {
+  return status >= 300 && status < 400;
+}
+
+// Best-effort body discard WITHOUT reading it (C3 redirect refusal): the
+// bytes of a redirect response must never reach a consumer. cancel() may
+// never settle, so its rejection is swallowed like cancelReaderQuietly's.
+function discardBodyQuietly(res) {
+  try {
+    if (res && res.body && typeof res.body.cancel === 'function') {
+      const p = res.body.cancel();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+  } catch (e) { /* synchronous cancel failure: ignore */ }
+}
+
+// ------------------------------------------------------------
+//  C3 credential port (spec.credentials): { bindings(), value(name) },
+//  both calls may return Promises. bindings() lists the user-bound
+//  credential headers; value(name) resolves ONE name to its secret AFTER
+//  validation and (for side-effecting methods) approval. The port sees
+//  credential names only — never URLs, request headers or responses.
+//  Reference grammar: `$NAME` or `${NAME}` with NAME matching
+//  [A-Z][A-Z0-9_]{1,63}. Anything else ($foo, $1, lowercase) is literal
+//  text and is sent untouched.
+// ------------------------------------------------------------
+const CREDENTIAL_NAME_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
+const CREDENTIAL_REF_PATTERN = /\$(?:([A-Z][A-Z0-9_]{1,63})|\{([A-Z][A-Z0-9_]{1,63})\})/g;
+
+function normalizeCredentialsPort(raw) {
+  if (raw == null) return null;
+  if (typeof raw !== 'object' || typeof raw.bindings !== 'function'
+    || typeof raw.value !== 'function') {
+    throw makeNetError('network_credential_unavailable', 'credential port is not available');
+  }
+  return raw;
+}
+
+// The exact header value a binding accepts for a reference.
+function isExactCredentialReference(binding, name, value) {
+  const bare = '$' + name;
+  const braced = '${' + name + '}';
+  return binding.scheme === 'Bearer'
+    ? (value === 'Bearer ' + bare || value === 'Bearer ' + braced)
+    : (value === bare || value === braced);
+}
+
+// The usage spelling shown in credential errors (names/headers only).
+function credentialExpectedForm(binding, refText) {
+  return (binding.scheme === 'Bearer' ? 'Bearer ' : '')
+    + (refText || '$' + binding.name);
+}
+
+// Pure validation of the port's bindings and of every `$NAME` reference in
+// the request's header values, plus the literal-key refusal. Throws the
+// network_credential_* taxonomy; returns a plan (the ONE referenced
+// binding) or null when the request carries no reference.
+async function planCredentialUse(port, parsed, headers) {
+  let bindings;
+  try {
+    bindings = await port.bindings();
+  } catch (e) {
+    throw makeNetError('network_credential_unavailable', 'credential bindings are not available');
+  }
+  if (!Array.isArray(bindings)) {
+    throw makeNetError('network_credential_unavailable', 'credential bindings are not available');
+  }
+  for (const b of bindings) {
+    if (!b || typeof b !== 'object' || Array.isArray(b)
+      || typeof b.name !== 'string' || !CREDENTIAL_NAME_PATTERN.test(b.name)
+      || typeof b.header !== 'string' || !b.header
+      || (b.scheme !== null && b.scheme !== 'Bearer')
+      || typeof b.origin !== 'string' || !b.origin
+      || typeof b.pathPrefix !== 'string'
+      || (b.status !== undefined && typeof b.status !== 'string')) {
+      throw makeNetError('network_credential_unavailable', 'credential bindings are not available');
+    }
+  }
+
+  // Scan header VALUES for references (names are already lowercase).
+  const refs = [];
+  for (const headerName of Object.keys(headers)) {
+    const value = String(headers[headerName]);
+    CREDENTIAL_REF_PATTERN.lastIndex = 0;
+    let m;
+    while ((m = CREDENTIAL_REF_PATTERN.exec(value)) !== null) {
+      refs.push({ headerName: headerName, headerValue: value, name: m[1] || m[2], refText: m[0] });
+    }
+  }
+  if (refs.length > 1) {
+    throw makeNetError('network_credential_multiple',
+      'multiple credential references in one request (at most one is allowed)');
+  }
+
+  let plan = null;
+  if (refs.length === 1) {
+    const ref = refs[0];
+    const binding = bindings.find((b) => b.name === ref.name) || null;
+    if (!binding) {
+      throw makeNetError('network_credential_unknown', 'unknown credential: ' + ref.name);
+    }
+    if (binding.status === 'needs-connection') {
+      throw makeNetError('network_credential_not_connected',
+        'credential ' + binding.name + ' is not connected — connect it in Settings → Capabilities');
+    }
+    if (binding.status === 'needs-reconfirm') {
+      throw makeNetError('network_credential_needs_reconfirm',
+        'credential ' + binding.name + ' needs reconfirmation — confirm it in Settings → Capabilities');
+    }
+    const formOk = ref.headerName === binding.header.toLowerCase()
+      && isExactCredentialReference(binding, ref.name, ref.headerValue);
+    if (!formOk) {
+      throw makeNetError('network_credential_form_invalid',
+        'credential ' + binding.name + ' must be used as: -H "' + binding.header + ': '
+        + credentialExpectedForm(binding, ref.refText) + '"');
+    }
+    if (parsed.origin !== binding.origin || !parsed.pathname.startsWith(binding.pathPrefix)) {
+      throw makeNetError('network_credential_binding_mismatch',
+        'credential ' + binding.name + ' is bound to ' + binding.origin + binding.pathPrefix
+        + ' and cannot be sent to ' + parsed.origin + parsed.pathname);
+    }
+    plan = { port: port, name: binding.name, headerName: ref.headerName, binding: binding };
+  }
+
+  // Literal-key refusal: on a binding's own target, its header must carry
+  // a reference form — a literal value is refused whether or not the
+  // request references some other credential.
+  for (const b of bindings) {
+    if (parsed.origin !== b.origin || !parsed.pathname.startsWith(b.pathPrefix)) continue;
+    const headerName = b.header.toLowerCase();
+    if (!Object.prototype.hasOwnProperty.call(headers, headerName)) continue;
+    if (isExactCredentialReference(b, b.name, headers[headerName])) continue;
+    throw makeNetError('network_credential_literal_refused',
+      'refusing to send a literal value for credential ' + b.name
+      + ' — write the variable instead: -H "' + b.header + ': '
+      + credentialExpectedForm(b, null) + '"');
+  }
+  return plan;
+}
+
+// The ONE value() call: post-approval, pre-send. The value must be a
+// non-empty, control-character-free string; the reference in the header is
+// replaced with it (e.g. "Bearer <value>"). Never called for a request
+// that failed validation or was denied.
+async function resolveCredentialValue(cred, headers) {
+  let value;
+  try {
+    value = await cred.port.value(cred.name);
+  } catch (e) {
+    throw makeNetError('network_credential_unavailable',
+      'credential ' + cred.name + ' is not available');
+  }
+  if (typeof value !== 'string' || !value.length || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw makeNetError('network_credential_unavailable',
+      'credential ' + cred.name + ' is not available');
+  }
+  headers[cred.headerName] = cred.binding.scheme === 'Bearer'
+    ? 'Bearer ' + value : value;
+  return value;
+}
+
+// Response echo shielding: replace every occurrence of the credential
+// value (its UTF-8 byte sequence in the body, its text in header values
+// and the final URL) with a placeholder, and mark the result.
+function redactCredentialFromResult(result, value) {
+  if (!result || typeof result !== 'object' || !value) return result;
+  const PLACEHOLDER = '[credential redacted]';
+  const encoder = new TextEncoder();
+  const redacted = Object.assign({}, result, { credentialRedacted: true });
+  if (result.bytes && result.bytes.byteLength) {
+    redacted.bytes = replaceBytesAll(result.bytes, encoder.encode(value),
+      encoder.encode(PLACEHOLDER));
+  }
+  const scrub = (s) => (typeof s === 'string' && s.indexOf(value) !== -1
+    ? s.split(value).join(PLACEHOLDER) : s);
+  if (Array.isArray(result.headerList)) {
+    redacted.headerList = result.headerList.map((pair) => [pair[0], scrub(pair[1])]);
+  }
+  if (result.headers && typeof result.headers === 'object') {
+    const out = {};
+    for (const k of Object.keys(result.headers)) out[k] = scrub(result.headers[k]);
+    redacted.headers = out;
+  }
+  redacted.finalUrl = scrub(result.finalUrl);
+  return redacted;
+}
+
+// Byte-substring replace-all over a Uint8Array; returns the SAME array
+// when nothing matches (no copy for the common case).
+function replaceBytesAll(hay, needle, rep) {
+  if (!hay || !hay.byteLength || !needle.byteLength
+    || needle.byteLength > hay.byteLength) {
+    return hay;
+  }
+  const hits = [];
+  const last = hay.byteLength - needle.byteLength;
+  for (let i = 0; i <= last; i++) {
+    if (hay[i] !== needle[0]) continue;
+    let ok = true;
+    for (let j = 1; j < needle.byteLength; j++) {
+      if (hay[i + j] !== needle[j]) { ok = false; break; }
+    }
+    if (ok) { hits.push(i); i += needle.byteLength - 1; }
+  }
+  if (!hits.length) return hay;
+  const out = new Uint8Array(hay.byteLength - hits.length * (needle.byteLength - rep.byteLength));
+  let src = 0;
+  let dst = 0;
+  for (const h of hits) {
+    while (src < h) out[dst++] = hay[src++];
+    for (let j = 0; j < rep.byteLength; j++) out[dst++] = rep[j];
+    src += needle.byteLength;
+  }
+  while (src < hay.byteLength) out[dst++] = hay[src++];
+  return out;
 }
 
 // The FINAL URL after any followed redirects must still be http(s).
