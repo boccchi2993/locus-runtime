@@ -439,6 +439,10 @@ function createRuntimeSession(workerAssets, onReleased) {
             signal: merged.signal,
             mutationPolicy: ctx.mutationPolicy,
             authorization: ctx.authorization,
+            // C3 credential resolution port: pass-through exactly like the
+            // authorization port — the session binding supplies it, the
+            // runtime never constructs or stores credentials.
+            credentials: ctx.credentials,
             // Runtime-internal injections: the session's OWN interpreter and
             // grep worker asset — a request can never execute on a foreign
             // instance or fetch its worker source from anywhere else.

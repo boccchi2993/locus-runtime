@@ -1859,6 +1859,11 @@ const SHELL_COMMANDS = {
     summary: 'HTTP/HTTPS requests — GET/HEAD are anonymous reads; POST/PUT/PATCH/DELETE ask for user approval',
     stdin: false, run: shCurl,
   },
+  sleep: {
+    usage: 'sleep <seconds>',
+    summary: 'pause for a number of seconds (decimals allowed, max 60); use between repeated API calls to stay under rate limits',
+    stdin: false, run: shSleep,
+  },
   which: {
     usage: 'which <command>...',
     summary: 'print the /usr/bin path of supported commands (registry lookup only — no external PATH)',
@@ -1985,6 +1990,8 @@ function shellSystemPromptSection() {
     '  Requests are anonymous by construction: browser cookies are never attached, and Cookie / Sec-* /',
     '  hop-by-hop headers are not sent. Arbitrary TCP/UDP, raw sockets and non-HTTP protocols are unavailable.',
     '  If curl fails, report the error; do NOT switch to cloud_bash for network access.',
+    '  When calling the same API repeatedly, put "sleep 0.3" between calls; on HTTP 429 wait ("sleep 2") and retry at most 3 times.',
+    '  Credentials: write the variable, never the key: -H "Authorization: Bearer $NAME". It is resolved only for the address the credential is bound to.',
     '  python usage: for short one-liners use python -c "<code>"; for anything multi-line or containing mixed quotes,',
     '  prefer the heredoc form — the code between the markers is passed to Python verbatim:',
     '    python <<\'PY\'',
@@ -3727,6 +3734,36 @@ async function shPython(ctx, args) {
   return await runPython(args.map((t) => t.text), ctx, ctx.opts);
 }
 
+// ---------- sleep ----------
+// Exactly one plain decimal argument (no suffixes, no signs), 0 < s ≤ 60.
+// The wait rides the shell's uniform cancellation gate: a task cancel ends
+// the sleep immediately and is reported as CANCELLED, never as success.
+async function shSleep(ctx, args) {
+  const signal = ctx.opts && ctx.opts.signal;
+  if (args.length !== 1 || !/^\d+(\.\d+)?$/.test(args[0].text)) {
+    return shErr('usage: sleep <seconds>');
+  }
+  const seconds = Number.parseFloat(args[0].text);
+  if (!(seconds > 0 && seconds <= 60)) {
+    return shErr('usage: sleep <seconds>');
+  }
+  throwIfCancelled(signal, 'sleep');
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); resolve(); }, Math.ceil(seconds * 1000));
+    const onAbort = () => { cleanup(); reject(makeCancelledError('sleep')); };
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+    };
+    if (signal) {
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+  throwIfCancelled(signal, 'sleep');
+  return shOk('');
+}
+
 async function shCurl(ctx, args) {
   return await runCurl(args.map((t) => t.text), ctx, ctx.opts);
 }
@@ -4322,6 +4359,9 @@ async function runCurl(args, ctx, opts) {
       // consumer decides; the shell neither constructs approvals nor
       // carries any chat identity.
       authorization: opts && opts.authorization,
+      // C3 credential resolution port: pass-through like authorization —
+      // the session binding supplies it; the shell never resolves values.
+      credentials: opts && opts.credentials,
     });
   } catch (e) {
     if (isCancelledError(e)) return netResult('curl: cancelled', false);
@@ -4332,6 +4372,16 @@ async function runCurl(args, ctx, opts) {
     }
     return netResult('curl: ' + (e && e.message ? e.message : String(e)), false);
   }
+
+  // C3: the runtime redacted the credential value from the response before
+  // handing it over — say so once on stderr, whatever the output shape.
+  const withRedactionNotice = (r) => {
+    if (res.credentialRedacted) {
+      r.stderr = [r.stderr, '[curl: credential value redacted from the response]']
+        .filter(Boolean).join('\n');
+    }
+    return r;
+  };
 
   // HEAD (-I): show the response headers — never a body (a non-conforming
   // server that sends one on HEAD must not surface through the shell).
@@ -4344,7 +4394,7 @@ async function runCurl(args, ctx, opts) {
       if (String(pair[0]).startsWith('x-locus-')) continue;
       lines.push(pair[0] + ': ' + pair[1]);
     }
-    return netResult(lines.join('\n'), res.status < 400, res);
+    return withRedactionNotice(netResult(lines.join('\n'), res.status < 400, res));
   }
 
   // An HTTP error status is an authoritative response, not a transport
@@ -4358,26 +4408,28 @@ async function runCurl(args, ctx, opts) {
       const preview = new TextDecoder().decode(res.bytes.slice(0, 500)).replace(/\n$/, '');
       if (preview.trim()) output += '\n' + preview;
     }
-    return netResult(output, false, res);
+    return withRedactionNotice(netResult(output, false, res));
   }
 
   if (outFile) {
     // The fetch awaited: re-check cancellation before writing the file.
     throwIfCancelled(opts && opts.signal, 'curl');
-    // Binary-safe: raw bytes go straight into the VFS, no decoding.
+    // Binary-safe: raw bytes go straight into the VFS, no decoding. A
+    // credentialed response's bytes were already redacted by the runtime
+    // (shield-then-write — the value never reaches the VFS).
     await vfs.write(outFile, res.bytes);
     // Telemetry stays `network`: the download IS the network operation.
-    return netResult('[written to ' + outFile + ', ' + res.bytes.byteLength + ' bytes]', true, res);
+    return withRedactionNotice(netResult('[written to ' + outFile + ', ' + res.bytes.byteLength + ' bytes]', true, res));
   }
 
   if (isTextLikeMime(res.headers['content-type'])) {
-    return netResult(new TextDecoder('utf-8').decode(res.bytes).replace(/\n$/, ''), true, res);
+    return withRedactionNotice(netResult(new TextDecoder('utf-8').decode(res.bytes).replace(/\n$/, ''), true, res));
   }
 
   const mime = String(res.headers['content-type'] || 'application/octet-stream').split(';')[0].trim();
-  return netResult(
+  return withRedactionNotice(netResult(
     'curl: binary response (' + mime + ', ' + res.bytes.byteLength + ' bytes); use curl -o <file> <url>',
-    true, res);
+    true, res));
 }
 
 // ============================================================
