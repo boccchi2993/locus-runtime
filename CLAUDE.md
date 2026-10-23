@@ -5,6 +5,7 @@
 
 本仓库是 Locus 三仓结构中的 runtime：浏览器本地的 Unix-like 执行基底（Linux-like VFS、shell、Python/worker、有界网络），不依赖 harness 或 product 独立构建与测试。
 另两个仓库：[locus-product](https://github.com/boccchi2993/locus-product)、[locus-harness](https://github.com/boccchi2993/locus-harness)。
+官方参考能力包在 [locus-example-capabilities](https://github.com/boccchi2993/locus-example-capabilities)（见 locus-product docs/DECISIONS.md D11）。
 
 ## 架构决定
 
