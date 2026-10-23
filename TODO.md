@@ -19,3 +19,14 @@ Implementation path:
 Acceptance: reproducible diagnosis, fixing commit and test evidence linked here; startup failure remains nonzero. Do not close this item solely by retrying, increasing timeouts or observing a green run.
 
 Related: [Product maintenance index](https://github.com/boccchi2993/locus-product/blob/main/TODO.md); [Harness test-result classification](https://github.com/boccchi2993/locus-harness/blob/main/TODO.md).
+
+## E3: Pyodide SystemError on denied js.fetch
+
+- [ ] Open. Owner: Runtime (Pyodide bridge layer); root cause under investigation (RT-D3).
+
+> **临时例外（所有者 2026-10-23 批准，修复合并后失效）**：browser gate 中 B-PY1（product）/ E3（runtime）检查失败时，如果同时满足以下三条，允许重跑**一次**：
+> 1. 失败输出中的异常正好是 `SystemError: error return without exception set`（product 看 `DIAG B-PY1 FULL` 行）；
+> 2. 同一次运行中零请求的检查（B-PY1b / E3b）通过，即探针请求数为 0；
+> 3. 该次运行中没有任何其他检查失败。
+> 重跑前，必须先在这里追加一行：失败 run 的链接、head SHA、日期、DIAG 原文的最后一行。重跑后再追加结果。重跑仍失败，或任一条件不满足，照常停下来报告，不得再次重跑。
+> 背景：2026-10-23 本机实验，PR #32 前后各 10 次，各失败 1 次，异常均为上述 SystemError，探针 0 请求；根因在 runtime 的 Pyodide 桥接层，调查中（RT-D3）。
