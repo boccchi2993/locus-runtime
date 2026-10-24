@@ -114,6 +114,132 @@ const PYTHON_INSTALLER_SUPPORT_FILES = Object.freeze([
   'packaging-23.2-py3-none-any.whl',
 ]);
 
+// ---------- Python runtime identity export (capability packages, D13) ----------
+// The Python ABI identity of the preloaded interpreter, DERIVED — never
+// retyped. PYODIDE_VERSION parses out of PYODIDE_BASE (the single pinned
+// source above); PYTHON_ABI parses out of the NATIVE wheels in
+// PYTHON_BOOTSTRAP_MANIFEST; PYTHON_RUNTIME_PACKAGES normalizes (PEP 503)
+// every wheel name in the manifest. Capability packages import-check
+// against these values (wheel platform tags; the "runtime already ships
+// it" set), so a derivation that cannot be made FAILS AT MODULE LOAD —
+// silently exporting wrong identity data would accept incompatible wheels.
+
+// PEP 503 distribution-name normalization: runs of `-`, `_` and `.`
+// collapse to one `-`, then lowercase.
+function normalizeDistName(name) {
+  if (typeof name !== 'string') {
+    throw new TypeError('normalizeDistName: name must be a string');
+  }
+  return name.replace(/[-_.]+/g, '-').toLowerCase();
+}
+
+// PEP 427 wheel filename parse:
+//   {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl
+// Distribution and version never contain dashes (escaped to underscores),
+// so the stem is exactly 5 or 6 dash-separated parts; a 6th is the build
+// tag, which must start with a digit. Returns null for any other shape —
+// callers decide whether that is fatal (identity derivation below) or a
+// plain "incompatible" (wheelPlatformCompatible).
+function parseWheelFilename(filename) {
+  if (typeof filename !== 'string' || !filename.endsWith('.whl')) return null;
+  const parts = filename.slice(0, -'.whl'.length).split('-');
+  if (parts.length < 5 || parts.length > 6 || parts.some((p) => !p)) return null;
+  let build = null;
+  let python = parts[2];
+  let abi = parts[3];
+  let platform = parts[4];
+  if (parts.length === 6) {
+    build = parts[2];
+    if (!/^\d[^-]*$/.test(build)) return null;
+    python = parts[3];
+    abi = parts[4];
+    platform = parts[5];
+  }
+  return { dist: parts[0], version: parts[1], build: build, python: python, abi: abi, platform: platform };
+}
+
+// Module-load derivation #1: the Pyodide version pinned by PYODIDE_BASE —
+// one source of truth; changing PYODIDE_BASE changes this with it.
+const PYODIDE_VERSION = (function () {
+  const m = /\/pyodide\/v([^/]+)\//.exec(PYODIDE_BASE);
+  if (!m || !m[1]) {
+    throw new Error('PYODIDE_BASE does not carry a /pyodide/v<version>/ segment: ' + PYODIDE_BASE);
+  }
+  return m[1];
+})();
+
+// Module-load derivation #2: the ABI identity every NATIVE wheel in the
+// manifest must agree on (the platform tag 'any' marks a pure wheel, which
+// carries no ABI identity). No native wheel, an unparseable wheel name or
+// disagreeing native wheels is a bootstrap-manifest bug and throws here.
+const PYTHON_ABI = (function () {
+  let identity = null;
+  for (const entry of PYTHON_BOOTSTRAP_MANIFEST) {
+    if (!entry.name.endsWith('.whl')) continue;
+    const parsed = parseWheelFilename(entry.name);
+    if (!parsed) {
+      throw new Error('PYTHON_BOOTSTRAP_MANIFEST holds an unparseable wheel filename: ' + entry.name);
+    }
+    if (parsed.platform === 'any') continue;
+    if (!identity) identity = { python: parsed.python, platform: parsed.platform };
+    else if (identity.python !== parsed.python || identity.platform !== parsed.platform) {
+      throw new Error('PYTHON_BOOTSTRAP_MANIFEST native wheels disagree on the Python ABI: '
+        + identity.python + ' @ ' + identity.platform + ' vs ' + parsed.python + ' @ '
+        + parsed.platform + ' (' + entry.name + ')');
+    }
+  }
+  if (!identity) {
+    throw new Error('PYTHON_BOOTSTRAP_MANIFEST holds no native wheel to derive the Python ABI from');
+  }
+  return Object.freeze(identity);
+})();
+
+// Module-load derivation #3: every preloaded Python distribution (the
+// pandas closure plus the micropip installer closure), PEP 503-normalized
+// and sorted. The "runtime already ships it" set: a capability package
+// must not carry its own wheel for any name in it.
+const PYTHON_RUNTIME_PACKAGES = Object.freeze(Array.from(new Set(
+  PYTHON_BOOTSTRAP_MANIFEST
+    .filter((entry) => entry.name.endsWith('.whl'))
+    .map((entry) => {
+      const parsed = parseWheelFilename(entry.name);
+      if (!parsed) {
+        throw new Error('PYTHON_BOOTSTRAP_MANIFEST holds an unparseable wheel filename: ' + entry.name);
+      }
+      return normalizeDistName(parsed.dist);
+    })
+)).sort());
+
+// PEP 427 tag compatibility of one wheel filename against the preloaded
+// interpreter (capability-package import checks, D13):
+//   - platform 'any' + abi 'none' -> pure Python, compatible;
+//   - python AND abi tags containing the runtime's python tag, on the
+//     runtime's exact platform tag -> native, compatible;
+//   - anything else incompatible, with the required ABI in the reason;
+//   - an invalid wheel filename is never compatible.
+// reason is non-empty exactly when ok is false.
+function wheelPlatformCompatible(filename) {
+  const parsed = parseWheelFilename(filename);
+  if (!parsed) {
+    return { ok: false, kind: null,
+      reason: 'not a valid wheel filename (PEP 427 {dist}-{version}(-{build})-{python}-{abi}-{platform}.whl): '
+        + String(filename) };
+  }
+  if (parsed.platform === 'any' && parsed.abi === 'none') {
+    return { ok: true, kind: 'pure', reason: '' };
+  }
+  if (parsed.python.indexOf(PYTHON_ABI.python) !== -1
+      && parsed.abi.indexOf(PYTHON_ABI.python) !== -1
+      && parsed.platform === PYTHON_ABI.platform) {
+    return { ok: true, kind: 'native', reason: '' };
+  }
+  return { ok: false, kind: null,
+    reason: 'wheel tags ' + parsed.python + '-' + parsed.abi + '-' + parsed.platform
+      + ' do not match this runtime (needs python and abi tags containing '
+      + PYTHON_ABI.python + ' on platform ' + PYTHON_ABI.platform
+      + ', or a pure wheel: abi none, platform any)' };
+}
+
 // The creator iframe's strict policy. No http/https/blob/data source in
 // script-src means no browser loader (script tag, importScripts, dynamic or
 // static import) has anything to load; connect-src 'none' kills every
@@ -4471,6 +4597,12 @@ export {
   PYTHON_BOOTSTRAP_CORE_ASSETS,
   PYTHON_RUNTIME_PACKAGE_FILES,
   PYTHON_INSTALLER_SUPPORT_FILES,
+  // python runtime identity export (capability-package import checks, D13)
+  PYODIDE_VERSION,
+  PYTHON_ABI,
+  PYTHON_RUNTIME_PACKAGES,
+  wheelPlatformCompatible,
+  normalizeDistName,
   PYTHON_TIMEOUT_MS,
   PYTHON_ASSET_TIMEOUT_MS,
   PYTHON_ASSET_STALL_MS,

@@ -115,6 +115,20 @@ export function shellCommandNames() {
   return Object.keys(SHELL_COMMANDS);
 }
 
+// ---------- Python runtime identity (docs D13) ----------
+// The preloaded interpreter's ABI identity, derived in shell.js from the
+// pinned bootstrap (single source of truth). Public surface for
+// capability-package import checks: wheel platform tags must match
+// PYTHON_ABI (or be pure), and a package must not carry a wheel for any
+// name in PYTHON_RUNTIME_PACKAGES.
+export {
+  PYODIDE_VERSION,
+  PYTHON_ABI,
+  PYTHON_RUNTIME_PACKAGES,
+  wheelPlatformCompatible,
+  normalizeDistName,
+} from './shell.js';
+
 // ---------- RuntimeHost ----------
 function createRuntimeHost(workerAssets) {
   const sessions = new Set();
@@ -132,6 +146,12 @@ function createRuntimeHost(workerAssets) {
         executionKinds: Object.freeze(['shell', 'python']),
         bootstrap: Object.freeze({ shaPinned: true }),
         policyMechanisms: Object.freeze(['mutationPolicy', 'authorization']),
+        // pythonAbiExport: the preloaded interpreter's ABI identity
+        // (PYODIDE_VERSION / PYTHON_ABI / PYTHON_RUNTIME_PACKAGES /
+        // wheelPlatformCompatible / normalizeDistName above) is part of
+        // this runtime's declared surface — capability packages import-
+        // check against it (docs D13).
+        pythonAbiExport: true,
         commands: Object.freeze(Object.keys(SHELL_COMMANDS).sort()),
         limits: IMPL_LIMITS,
       });
