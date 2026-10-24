@@ -24,6 +24,7 @@ const SUITES = [
   'python-lifecycle.test.cjs',
   'python-authority.test.cjs',
   'python-bootstrap-integrity.test.cjs',
+  'python-abi.test.cjs',
   'python-plugin-runtime.test.cjs',
   'shell-sleep.test.cjs',
   'runtime-standalone.test.mjs',
