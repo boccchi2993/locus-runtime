@@ -30,3 +30,6 @@ Related: [Product maintenance index](https://github.com/boccchi2993/locus-produc
 > 3. 该次运行中没有任何其他检查失败。
 > 重跑前，必须先在这里追加一行：失败 run 的链接、head SHA、日期、DIAG 原文的最后一行。重跑后再追加结果。重跑仍失败，或任一条件不满足，照常停下来报告，不得再次重跑。
 > 背景：2026-10-23 本机实验，PR #32 前后各 10 次，各失败 1 次，异常均为上述 SystemError，探针 0 请求；根因在 runtime 的 Pyodide 桥接层，调查中（RT-D3）。
+
+## pyfetch denial layer changes when plugins are installed (observation, 2026-10-23)
+- [ ] Open. 本机实验（装有 lxml / Pillow 等 plugin 的 worker）中，`pyodide.http.pyfetch` 被拒绝时的文本为 `Locus Python bootstrap: no in-memory asset for <url>`，而不是 F04a 拦截层的 `Python network access is disabled in Locus`；探针 0 请求，安全性质成立。推测：plugin 安装会先加载 micropip，micropip 导入 `pyodide.http`，后者在导入时捕获了当时的 `self.fetch`（即启动期资产解析函数），之后的 F04a 替换对它无效。待确认；修复方向是让启动期解析函数在 READY 前被拦截层取代，或在 lockdown 时同时处理 pyodide.http 内部引用。
