@@ -132,8 +132,11 @@ async function run() {
     && atob(collected.files.find((f) => f.path === 'a.txt').b64) === 'hello\n');
   check('W12 no skips under limits', collected.skipped.length === 0, JSON.stringify(collected.skipped));
 
-  // oversized file → skipped WITH its path (not just a count)
-  const bigTree = { files: { 'big.bin': new Uint8Array(6 * 1024 * 1024), 'small.txt': 'ok' }, dirs: {} };
+  // oversized file → skipped WITH its path (not just a count).
+  // 2026-10-30 RT-16MIB: the per-file mirror cap moved from 5 MiB to
+  // NETWORK_MAX_RESPONSE_BYTES (16 MiB), so the over-limit sample is now
+  // 16 MiB + 1 byte (the old 6 MiB sample no longer exceeds it).
+  const bigTree = { files: { 'big.bin': new Uint8Array(16 * 1024 * 1024 + 1), 'small.txt': 'ok' }, dirs: {} };
   const bigWs = new M.LocalDirectoryWorkspace(makeDirHandle('big', bigTree));
   const collected2 = await M.collectWorkspaceFiles(bigWs);
   check('W13 oversized file skipped', collected2.files.length === 1 && collected2.files[0].path === 'small.txt');
@@ -167,6 +170,53 @@ async function run() {
     escapeErr && escapeErr.message);
   await mkWs.mkdir('/'); // workspace root: already exists → no-op
   check('W23 mkdir workspace root is a no-op', true);
+
+  // ---------- W8. RT-16MIB (owner decision, 2026-10-30): per-file mirror
+  // cap = curl response cap. NETWORK_MAX_RESPONSE_BYTES (16 MiB) instead of
+  // 5 MiB, so a file the network layer accepts is visible to Python. W13/W14
+  // above carry the over-limit sample (16 MiB + 1); these checks pin the new
+  // boundary behavior itself.
+  function rt16Bytes(n) {
+    const bytes = new Uint8Array(n);
+    for (let i = 0; i < n; i++) bytes[i] = i & 0xff;
+    return bytes;
+  }
+
+  // 6 MiB (the lxml native wheel size class) must be collected again, and
+  // byte-exact: base64 is bijective, so string equality IS byte equality.
+  const sixPayload = rt16Bytes(6 * 1024 * 1024);
+  const sixTree = { files: { 'w6mib.bin': sixPayload }, dirs: {} };
+  const sixCollected = await M.collectWorkspaceFiles(new M.LocalDirectoryWorkspace(makeDirHandle('six', sixTree)));
+  const sixFile = sixCollected.files.find((f) => f.path === 'w6mib.bin');
+  check('W24 6 MiB file is collected (no longer skipped)',
+    !!sixFile && sixCollected.skipped.length === 0, JSON.stringify(sixCollected.skipped));
+  check('W25 6 MiB content byte-exact',
+    !!sixFile && sixFile.b64 === Buffer.from(sixPayload).toString('base64'),
+    sixFile ? 'b64 mismatch' : 'file missing');
+
+  // Boundary is inclusive: exactly SYNC_MAX_FILE_BYTES passes.
+  const edgeTree = { files: { 'edge16mib.bin': rt16Bytes(16 * 1024 * 1024) }, dirs: {} };
+  const edgeCollected = await M.collectWorkspaceFiles(new M.LocalDirectoryWorkspace(makeDirHandle('edge', edgeTree)));
+  check('W26 exactly-16-MiB file is collected',
+    edgeCollected.files.length === 1 && edgeCollected.files[0].path === 'edge16mib.bin'
+    && edgeCollected.skipped.length === 0, JSON.stringify(edgeCollected.skipped));
+
+  // One byte over is skipped, and the reason carries the NEW limit number.
+  const overTree = { files: { 'over.bin': rt16Bytes(16 * 1024 * 1024 + 1) }, dirs: {} };
+  const overCollected = await M.collectWorkspaceFiles(new M.LocalDirectoryWorkspace(makeDirHandle('over', overTree)));
+  check('W27 16 MiB+1 file skipped, reason carries the 16 MiB limit',
+    overCollected.files.length === 0 && overCollected.skipped.length === 1
+    && overCollected.skipped[0].path === 'over.bin'
+    && overCollected.skipped[0].reason.includes('16777216'), JSON.stringify(overCollected.skipped));
+
+  // SYNC_MAX_TOTAL_BYTES (25 MiB) still enforced per mount: 15 MiB passes the
+  // per-file cap, but the second 15 MiB file would push the total to 30 MiB.
+  const totalTree = { files: { 't1.bin': rt16Bytes(15 * 1024 * 1024), 't2.bin': rt16Bytes(15 * 1024 * 1024) }, dirs: {} };
+  const totalCollected = await M.collectWorkspaceFiles(new M.LocalDirectoryWorkspace(makeDirHandle('total', totalTree)));
+  check('W28 second 15 MiB file skipped by the 25 MiB total cap',
+    totalCollected.files.length === 1 && totalCollected.files[0].path === 't1.bin'
+    && totalCollected.skipped.length === 1 && totalCollected.skipped[0].path === 't2.bin'
+    && totalCollected.skipped[0].reason.includes('over total snapshot limit'), JSON.stringify(totalCollected.skipped));
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');
   process.exit(failed ? 1 : 0);

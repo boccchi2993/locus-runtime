@@ -187,7 +187,10 @@ async function run() {
   check('C3 clean modify commits', c3.success === true && new TextDecoder().decode(wsC3.files['a.txt']) === 'after');
 
   // ---------- S. unsynced (skipped) paths are never overwritten (F10) ----------
-  const bigFile = new Uint8Array(6 * 1024 * 1024).fill(7); // over the 5 MiB per-file sync limit
+  // 2026-10-30 RT-16MIB: the per-file mirror cap moved to 16 MiB (the curl
+  // response cap), so the still-skipped sample must exceed THAT limit — the
+  // old 6 MiB fixture is now a normally synced file.
+  const bigFile = new Uint8Array(16 * 1024 * 1024 + 1).fill(7); // over the 16 MiB per-file sync limit
   const wsS = new MemWS();
   wsS.files['big.bin'] = bigFile;
   mockWorkerResult({ stdout: '', stderr: '', error: null, files: [{ path: '/mnt/workspace/big.bin', b64: b64('python created') }], deleted: [] });

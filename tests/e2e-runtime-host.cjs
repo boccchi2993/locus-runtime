@@ -135,6 +135,30 @@ async function main() {
       pyWrite.ok && catBack.ok && catBack.output === 'from-python',
       JSON.stringify({ pyWrite, catBack }));
 
+    // ---- B4d/e: RT-16MIB — a 6 MiB /tmp file is visible to Python ----
+    // Owner decision 2026-10-30: the mirror per-file cap now equals the
+    // curl response cap (NETWORK_MAX_RESPONSE_BYTES, 16 MiB). Before, a
+    // 6 MiB file (the lxml native wheel size class) was skipped by the
+    // snapshot and every python run announced it through the
+    // "[workspace sync: … NOT visible to Python …]" stdout notice.
+    const rt16Bytes = Buffer.alloc(6 * 1024 * 1024);
+    for (let i = 0; i < rt16Bytes.length; i++) rt16Bytes[i] = i & 0xff;
+    const rt16Sha = crypto.createHash('sha256').update(rt16Bytes).digest('hex');
+    await evaluate(cdp, `(async () => {
+      const bytes = new Uint8Array(6 * 1024 * 1024);
+      for (let i = 0; i < bytes.length; i++) bytes[i] = i & 0xff;
+      await window.__host.vfs.write('/tmp/rt16-6mib.bin', bytes);
+      return 'written';
+    })()`, 30000);
+    const rt16 = await evaluate(cdp,
+      'window.__host.runPython("import hashlib\\ndata = open(\'/tmp/rt16-6mib.bin\', \'rb\').read()\\nprint(len(data))\\nprint(hashlib.sha256(data).hexdigest())")', 300000);
+    check('B4d 6 MiB /tmp file visible to Python: exact length + sha256 (RT-16MIB)',
+      rt16.ok && (rt16.output || '').includes('6291456') && (rt16.output || '').includes(rt16Sha),
+      JSON.stringify(rt16).slice(0, 300));
+    check('B4e no workspace-sync skip notice for the 6 MiB file',
+      !(rt16.output || '').includes('NOT visible to Python'), (rt16.output || '').slice(-200));
+    await evaluate(cdp, "(async () => { await window.__host.vfs.remove('/tmp/rt16-6mib.bin'); return 'removed'; })()", 15000);
+
     // ---- B5 (part 2): python transitions arrived as events ----
     const statusKinds = await evaluate(cdp, 'window.__host.statusEvents.map((s) => s.interpreter)');
     check('B5b the boot/ready edges arrived as status events (no polling)',
