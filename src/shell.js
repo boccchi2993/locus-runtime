@@ -14,7 +14,7 @@
 // ============================================================
 import { utf8ByteLength } from './lib/utf8.js';
 import { normalizeVfsPath, vfsError, VirtualWorkspace } from './vfs.js';
-import { NetworkRuntime, safeNetworkUrlForDisplay } from './network.js';
+import { NetworkRuntime, safeNetworkUrlForDisplay, NETWORK_MAX_RESPONSE_BYTES } from './network.js';
 
 // USER PYTHON EXECUTION timeout ONLY (unchanged semantics): 30s covers the
 // worker run itself. Bootstrap phases own separate independent budgets below.
@@ -1722,7 +1722,13 @@ function b64ByteLength(b64) {
 // cannot see and (b) the write-back phase can refuse to overwrite those
 // paths with files Python created in their absence.
 const SYNC_MAX_FILES = 200;
-const SYNC_MAX_FILE_BYTES = 5 * 1024 * 1024;
+// RT-16MIB (owner decision, 2026-10-30): a file curl can download must be
+// visible to Python. The old 5 MiB per-file cap hid files the network layer
+// accepts (e.g. the 6.03 MiB lxml native wheel), so capability projects
+// could not be packaged with the SDK inside Locus. The cap references the
+// curl response limit directly instead of a second magic number. Until
+// incremental sync lands, the file-count and total-bytes caps stay put.
+const SYNC_MAX_FILE_BYTES = NETWORK_MAX_RESPONSE_BYTES;
 const SYNC_MAX_TOTAL_BYTES = 25 * 1024 * 1024;
 
 async function collectWorkspaceFiles(workspace, signal) {
