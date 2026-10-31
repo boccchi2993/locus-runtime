@@ -691,6 +691,21 @@ async function main() {
       && e15b.output.replace(/\n$/, '') === 'processed:pyauth-fixture',
       JSON.stringify(e15.output) + ' | ' + JSON.stringify(e15b));
 
+    // ---- E20: python traceback denoising (C5) — REAL worker traceback ----
+    // A ZeroDivisionError from user code must be shown with the Pyodide
+    // internal frames collapsed into the marker line: the display starts
+    // with the marker, keeps the user frame (<exec>) and the exception
+    // line, and never shows _pyodide frames.
+    const e20 = await runPy(['x = 1', 'y = x / 0']);
+    check('E20 traceback denoised: marker first, user frame + ZeroDivisionError kept, no _pyodide frames',
+      !e20.success
+      && e20.output.startsWith('[Locus: ')
+      && e20.output.includes('internal Pyodide frames hidden]')
+      && e20.output.includes('<exec>')
+      && e20.output.includes('ZeroDivisionError')
+      && e20.output.indexOf('_pyodide') === -1,
+      JSON.stringify(e20.output).slice(0, 400));
+
     // ---- E16: no HIDDEN attempts — ZERO probe-server traffic in the whole
     // suite. Every denial above, every prototype-chain probe, the closed
     // F04a-R1 dynamic import, both recovery cycles — all contributed ZERO

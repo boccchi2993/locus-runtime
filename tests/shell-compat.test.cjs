@@ -218,9 +218,12 @@ async function run() {
     check('L7 combined -lah', l7.success && l7.output.includes('.hidden') && l7.output.includes('KiB'), l7.output);
     const l8 = await exec('bash', 'ls -al sub', ws);
     check('L8 combined -al path', l8.success && l8.output.includes('.dotfile'), l8.output);
-    const l9 = await exec('bash', 'ls -R', ws);
-    check('L9 unknown option error lists supported', !l9.success && l9.output.includes('ls: unsupported option: -R')
-      && l9.output.includes('-a -l -h'), l9.output);
+    // L9 (C5): -R is now a SUPPORTED ls flag (recursive listing); the
+    // unknown-option check uses a genuinely unsupported option and the
+    // message lists the new supported set.
+    const l9 = await exec('bash', 'ls -Z', ws);
+    check('L9 unknown option error lists supported', !l9.success && l9.output.includes('ls: unsupported option: -Z')
+      && l9.output.includes('-a -l -h -R'), l9.output);
     const l10 = await exec('bash', 'ls missing', ws);
     check('L10 missing path error', !l10.success && l10.output.includes('no such file or directory'), l10.output);
     const l11 = await exec('bash', 'ls "dir with space"', ws);
@@ -432,8 +435,10 @@ async function run() {
       && !x1.output.split('\n').includes('/'), x1.output);
     const x2 = await exec('bash', 'ls & pwd', ws);
     check('X2 background & unsupported', !x2.success && x2.output.includes("unsupported operator: '&'"), x2.output);
+    // X3 (C5): `cmd < file` is now SUPPORTED — the file becomes the
+    // command's stdin (was: "unsupported operator: '<'").
     const x3 = await exec('bash', 'cat < a.txt', ws);
-    check('X3 input redirect unsupported', !x3.success && x3.output.includes("unsupported operator: '<'"), x3.output);
+    check('X3 input redirect reads the file as stdin', x3.success && x3.output === 'foo\nbar\nfoo again\n', x3.output);
     const x4 = await exec('bash', 'echo hi 2> err.txt', ws);
     check('X4 2> supported: empty stderr creates empty file', x4.success && x4.output === 'hi'
       && ('err.txt' in ws.files) && dec(ws.files['err.txt']) === '', x4.output);
