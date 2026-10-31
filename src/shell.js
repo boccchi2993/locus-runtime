@@ -1804,6 +1804,15 @@ const HEAD_TAIL_MAX_OUTPUT_BYTES = CAT_MAX_FILE_BYTES;
 // sort holds every input line in memory at once, so its total input is
 // bounded separately (all operands + stdin combined).
 const SORT_MAX_INPUT_BYTES = 8 * 1024 * 1024;
+// ls -R emits one "path:" section per visited directory; the whole listing
+// is bounded like find (results cap + truncation notice) so a deep tree can
+// never balloon the terminal output. Lines and characters are both capped.
+const LS_R_MAX_LINES = 2000;
+const LS_R_MAX_CHARS = 512 * 1024; // == CAT_MAX_FILE_BYTES (terminal-output bound)
+// sed holds every input line in memory; its output is bounded like cat's
+// terminal output (a truncation notice is appended when over the cap).
+const SED_MAX_INPUT_BYTES = 2 * 1024 * 1024;
+const SED_MAX_OUTPUT_CHARS = 512 * 1024;
 
 // Tokenize one command line, keeping quote/operator information.
 // Returns [{text, quoted, op, pos}] — quoted text is DATA, never syntax, so
@@ -1889,8 +1898,151 @@ function extractPythonHeredoc(line) {
   return { code: bodyLines.join('\n') };
 }
 
+// ---------- generic heredoc (C5) ----------
+// One heredoc per command line: `cmd <<DELIM` / <<'DELIM' / <<"DELIM" /
+// <<-DELIM feeds the body lines (up to a line holding only DELIM) to the
+// command as stdin. There is no variable expansion in this shell, so all
+// three quoting forms behave identically. The extraction rewrites the
+// operator+delimiter out of the command line and leaves a placeholder
+// token that the executor turns into the command's stdin.
+const SHELL_HEREDOC_TOKEN = '__LOCUS_HEREDOC__';
+
+// Which simple command owns the FIRST unquoted `<<` of the first line?
+// Returns the command word (quote-aware mini-scan), or null. Redirects do
+// not start a new command segment; ; && || | do.
+function shellHeredocOwnerWord(firstLine) {
+  let tokens;
+  try {
+    tokens = shellTokenize(firstLine);
+  } catch (e) {
+    return null;
+  }
+  let cmdWord = null;
+  for (const t of tokens) {
+    if (t.op) {
+      if (t.text === '<<') return cmdWord;
+      if (t.text === ';' || t.text === '&&' || t.text === '||' || t.text === '|') cmdWord = null;
+      continue;
+    }
+    if (cmdWord === null) cmdWord = t.text;
+  }
+  return null;
+}
+
+// Scan the first line for the first unquoted `<<`; if present, parse the
+// delimiter, extract the body from the following lines up to the terminator
+// and return { line, body } where `line` is the command line with the
+// heredoc operator+delimiter replaced by SHELL_HEREDOC_TOKEN. Throws on a
+// malformed or unterminated heredoc. Returns null when the line has no
+// unquoted `<<` at all.
+function extractShellHeredoc(input) {
+  const s = String(input || '');
+  const nl = s.indexOf('\n');
+  const firstLine = nl === -1 ? s : s.slice(0, nl);
+  const rest = nl === -1 ? '' : s.slice(nl + 1);
+  let i = 0;
+  let q = null;
+  while (i < firstLine.length) {
+    const c = firstLine[i];
+    if (q) { if (c === q) q = null; i++; continue; }
+    if (c === '"' || c === "'") { q = c; i++; continue; }
+    if (c === '<' && firstLine[i + 1] === '<') {
+      // A `<<` glued onto a bare digit word (2<<EOF, 3<<EOF…) is an fd
+      // heredoc — refused with the number spelled out. A digit inside a
+      // larger word (x2<<EOF) is just a command name ending in a digit.
+      if (i > 0 && /[0-9]/.test(firstLine[i - 1])) {
+        let w = i - 1;
+        while (w >= 0 && /[0-9]/.test(firstLine[w])) w--;
+        if (w === -1 || firstLine[w] === ' ' || firstLine[w] === '\t') {
+          throw new Error("unsupported redirect: '" + firstLine.slice(w + 1, i) + "<<' "
+            + '(only stdin heredocs are supported; stderr heredocs are not)');
+        }
+      }
+      return parseHeredocFrom(firstLine, rest, i);
+    }
+    i++;
+  }
+  return null;
+
+  function parseHeredocFrom(line, bodyText, opPos) {
+    let k = opPos + 2;
+    let stripTabs = false;
+    if (line[k] === '-') { stripTabs = true; k++; }
+    while (line[k] === ' ' || line[k] === '\t') k++;
+    let delim = '';
+    let after = k;
+    if (line[k] === '"' || line[k] === "'") {
+      const close = line.indexOf(line[k], k + 1);
+      if (close === -1) throw new Error('unterminated quote in the heredoc delimiter');
+      delim = line.slice(k + 1, close);
+      after = close + 1;
+      if (!delim) throw new Error('empty heredoc delimiter');
+      if (after < line.length && !/[ \t><;|&]/.test(line[after])) {
+        throw new Error('invalid heredoc delimiter (the quoted delimiter must be a single word)');
+      }
+    } else {
+      let e = k;
+      while (e < line.length && !/[ \t><;|&]/.test(line[e])) e++;
+      if (e === k) {
+        throw new Error("invalid heredoc delimiter: expected a word after '<<' (forms: <<EOF, <<'EOF', <<\"EOF\", <<-EOF)");
+      }
+      delim = line.slice(k, e);
+      after = e;
+    }
+    const bodyLines = [];
+    const lines = bodyText.split('\n');
+    let end = -1;
+    for (let b = 0; b < lines.length; b++) {
+      const raw = lines[b].replace(/\r$/, '');
+      const candidate = stripTabs ? raw.replace(/^\t+/, '') : raw;
+      if (candidate === delim) { end = b; break; }
+      bodyLines.push(candidate);
+    }
+    if (end === -1) {
+      throw new Error("missing heredoc terminator '" + delim
+        + "' (the heredoc body must end with a line containing only " + delim + ')');
+    }
+    for (let t2 = end + 1; t2 < lines.length; t2++) {
+      if (lines[t2].trim()) {
+        throw new Error('unexpected text after the heredoc terminator: one bash invocation runs ONE command line'
+          + ' (run following commands in a separate bash call)');
+      }
+    }
+    return {
+      line: line.slice(0, opPos) + SHELL_HEREDOC_TOKEN + line.slice(after),
+      body: bodyLines.join('\n'),
+    };
+  }
+}
+
+// Alternative one-line suggestions for common commands this shell will
+// never implement, so the model can reroute in one tool call instead of
+// guessing. The `run \`help\`` pointer is appended by shellError either way.
+const SHELL_ALTERNATIVES = {
+  awk: 'simple column/field extraction: use python',
+  tr: 'character translation: use sed s/// or python',
+  xargs: 'sequence commands with ; or &&, or process the list in python',
+  tee: 'write with > file or append with >> file',
+  diff: 'compare files in python (read both and diff the lines)',
+  less: 'page through output with head / tail',
+  more: 'page through output with head / tail',
+  vi: 'no interactive editors; write files with echo / cat heredoc / redirects or python',
+  vim: 'no interactive editors; write files with echo / cat heredoc / redirects or python',
+  nano: 'no interactive editors; write files with echo / cat heredoc / redirects or python',
+  chmod: 'permissions are managed by the Locus mounts and cannot be changed',
+  ln: 'copy with cp or move with mv (no links)',
+  tar: 'create/extract archives with python (tarfile module)',
+  unzip: 'extract archives with python (zipfile module)',
+  zip: 'create archives with python (zipfile module)',
+  pip: 'packages cannot be installed at runtime; third-party packages ship as capability-plugin wheels',
+  npm: 'no Node.js in this runtime; script with python',
+  node: 'no Node.js in this runtime; script with python',
+};
+
 function shellError(cmd) {
+  const alt = SHELL_ALTERNATIVES[cmd];
   return 'bash: ' + cmd + ': command not available in local browser runtime'
+    + (alt ? ' — ' + alt : '')
     + ' (run `help` for the supported command list)';
 }
 
@@ -1912,8 +2064,9 @@ const SHELL_COMMANDS = {
     stdin: false, run: shCd,
   },
   ls: {
-    usage: 'ls [-a] [-l] [-h] [path...]',
-    summary: 'list directory entries (-a show dotfiles, -l long format, -h human-readable sizes)',
+    usage: 'ls [-a] [-l] [-h] [-R] [path...]',
+    summary: 'list directory entries (-a show dotfiles, -l long format, -h human-readable sizes,'
+      + ' -R recursive: one "path:" section per directory like GNU ls -R)',
     stdin: false, run: shLs,
   },
   cat: {
@@ -1955,6 +2108,13 @@ const SHELL_COMMANDS = {
     usage: 'sort [-n] [-r] [-u] [file...]',
     summary: 'sort lines (-n numeric-first, -r reverse, -u unique); reads stdin when no file is given',
     stdin: true, run: shSort,
+  },
+  sed: {
+    usage: 'sed [-n] [-e SCRIPT]... [-i] [-E|-r] [SCRIPT] [file...]',
+    summary: 'stream edit (subset): p (print), d (delete), s/RE/REPL/FLAGS (flags g, N, I; any'
+      + ' delimiter; & and \\1-\\9); addresses N, N,M, $, N,$; BRE by default, -E/-r for ERE;'
+      + ' -i edits files in place; reads stdin when no file is given',
+    stdin: true, run: shSed,
   },
   mv: {
     usage: 'mv <src>... <dest>',
@@ -2024,18 +2184,27 @@ const SHELL_OPERATORS = [
 const SHELL_REDIRECTS = [
   { op: '> file', summary: 'write stdout to file (truncate/create)' },
   { op: '>> file', summary: 'append stdout to file' },
+  { op: '< file', summary: 'use the file as the command\'s stdin (stdin consumers: cat grep head tail wc sort sed; python refuses <)' },
   { op: '2> file', summary: 'write stderr to file (truncate/create)' },
   { op: '2>> file', summary: 'append stderr to file' },
   { op: '2>&1', summary: 'send stderr to wherever stdout currently goes (order matters: > all.txt 2>&1 merges both into the file)' },
   { op: '> /dev/null', summary: 'discard output — /dev/null is only a redirection sink, not a file (cat /dev/null fails)' },
 ];
 
+const SHELL_HEREDOCS = [
+  { form: "cmd <<'EOF' … EOF", summary: 'feed the body lines to cmd as stdin; quoted, double-quoted and bare delimiters behave identically (no variable expansion in this shell)' },
+  { form: 'cmd <<-EOF … EOF', summary: 'same, with leading TABS stripped from the body lines' },
+  { form: "cat > f <<'EOF' … EOF", summary: 'write the body into f (>> appends); the redirect may also come first: cat <<\'EOF\' > f … EOF' },
+  { form: "python <<'PY' … PY", summary: 'run the marker-delimited code verbatim; must be the ONLY command of its bash invocation — no `cd x &&` before it, nothing after the closing marker; resolve paths inside Python (absolute paths or os.chdir)' },
+];
+
 const SHELL_UNSUPPORTED_NOTE =
   'Not supported: control structures (for / while / if / case / shell functions — use Python for complex logic), '
   + '&, $(...), backticks, subshells, variables/export, '
-  + 'glob expansion (* stays literal — use find -name instead), input redirect (<), '
-  + 'heredocs other than python (a python heredoc must be a standalone bash invocation; '
-  + 'run later commands in a separate bash call), file descriptors other than 2>&1 (no 1>&2 / 3> / &>). '
+  + 'glob expansion (* stays literal — use find -name instead), '
+  + 'file descriptors other than 2>&1 (no 1>&2 / 3> / &> / n<<), more than one heredoc per command line, and '
+  + 'python heredocs combined with other commands (a python heredoc must be a standalone bash invocation; '
+  + 'resolve paths inside Python with absolute paths or os.chdir). '
   + '/dev/null works only as a redirect target, never as a readable file. '
   + 'rm -rf / (and every protected mount root: /usr /home /home/locus /mnt /mnt/workspace '
   + '/mnt/upload /mnt/download /mnt/plugins) is always refused.';
@@ -2062,6 +2231,11 @@ function shellHelpText() {
       'Redirects:',
     ])
     .concat(SHELL_REDIRECTS.map((r) => '  ' + r.op + '  ' + r.summary))
+    .concat([
+      '',
+      'Heredocs (one per command line):',
+    ])
+    .concat(SHELL_HEREDOCS.map((h) => '  ' + h.form + '\n      ' + h.summary))
     .concat(['', SHELL_UNSUPPORTED_NOTE])
     .join('\n');
 }
@@ -2099,12 +2273,19 @@ function shellSystemPromptSection() {
     '  Supported redirects (applied left to right; order matters for 2>&1):',
     '    cmd > file      write stdout to file (truncate/create)',
     '    cmd >> file     append stdout to file',
+    '    cmd < file      use the file as the command\'s stdin (stdin consumers only: ' + stdinConsumers + ');',
+    '                    python refuses < — use "python <script.py>" or a python heredoc',
     '    cmd 2> file     write stderr to file (truncate/create)',
     '    cmd 2>> file    append stderr to file',
     '    cmd 2>&1        merge stderr into stdout\'s current destination',
     '    cmd > /dev/null discard output (also 2> / 2>>); /dev/null is a redirection sink only —',
     '                    it is not a file: cat /dev/null and ls /dev fail',
-    '  Redirection never turns a failed command into a successful one.',
+    '  Supported heredocs (exactly ONE per command line; the body ends at a line holding only the delimiter):',
+    "    cmd <<'EOF' … EOF   feed the body lines to cmd as stdin (<<EOF and <<\"EOF\" behave identically —",
+    '                    no variable expansion in this shell; <<-EOF also strips leading TABS from the body)',
+    "    cat > f <<'EOF' … EOF   write the body into f (>> appends); the redirect may also come first:",
+    "                    cat <<'EOF' > f … EOF",
+    "  Redirection never turns a failed command into a successful one.",
     '  rm -rf / (and every protected mount root) is always refused. Shell glob expansion is not supported:',
     '  * in command arguments stays literal — use find -name "*.tmp" to locate files.',
     '  ' + SHELL_UNSUPPORTED_NOTE,
@@ -2135,8 +2316,9 @@ function shellSystemPromptSection() {
     '  working directory. /mnt/upload is read-only, also from Python. python and curl do not read pipeline stdin.',
     '  Python has no network access and cannot fetch URLs or install packages; Python is for local',
     '  computation and files. Anything networked goes through curl.',
-    '  The python heredoc must be a STANDALONE bash invocation — nothing may follow the closing marker;',
-    '  run subsequent commands in a separate bash call.',
+  '  The python heredoc must be a STANDALONE bash invocation — nothing may precede it (no `cd x &&`) and',
+  '  nothing may follow the closing marker; run surrounding commands in separate bash calls. To work in a',
+  '  specific directory, chdir inside Python (os.chdir) or use absolute paths in the code.',
   ];
   return head.concat(cmds, tail).join('\n');
 }
@@ -2184,8 +2366,16 @@ function parseShellLine(tokens) {
         fail("unsupported operator: '&' (supported operators: ; && || |)");
         break;
       case '<':
+        // Input redirect (C5): the file operand becomes this command's
+        // stdin. The executor resolves and bounds it.
+        if (!current.length) fail("syntax error: redirect '<' without a command");
+        current.push(t);
+        pendingPipe = false;
+        break;
       case '<<':
-        fail("unsupported operator: '<' (input redirection is not supported; pass the file as an argument instead)");
+        // The FIRST heredoc of the line was already extracted before
+        // tokenizing; a `<<` reaching the parser is a second one.
+        fail('bash: at most one heredoc per command line');
         break;
       case '>':
       case '>>':
@@ -2391,7 +2581,7 @@ async function shCd(ctx, args) {
 }
 
 async function shLs(ctx, args) {
-  let flagA = false, flagL = false, flagH = false;
+  let flagA = false, flagL = false, flagH = false, flagR = false;
   const paths = [];
   for (const t of args) {
     if (!t.quoted && t.text.length > 1 && t.text.charAt(0) === '-') {
@@ -2399,13 +2589,15 @@ async function shLs(ctx, args) {
         if (ch === 'a') flagA = true;
         else if (ch === 'l') flagL = true;
         else if (ch === 'h') flagH = true;
-        else return shErr('ls: unsupported option: -' + ch + ' (supported options: -a -l -h)');
+        else if (ch === 'R') flagR = true;
+        else return shErr('ls: unsupported option: -' + ch + ' (supported options: -a -l -h -R)');
       }
     } else {
       paths.push(t.text);
     }
   }
   if (!paths.length) paths.push('.');
+  if (flagR) return lsRecursive(ctx, paths, flagA, flagL, flagH);
   const showHeader = paths.length > 1;
   const sections = [];
   for (const p of paths) {
@@ -2433,6 +2625,77 @@ async function shLs(ctx, args) {
     sections.push((showHeader ? p + ':\n' : '') + lines.join('\n'));
   }
   return shOk(sections.join('\n\n'));
+}
+
+// ls -R (C5): GNU-style recursive listing — one "path:" section per
+// directory (the operand as given for the root, operand/child for nested
+// directories), sections separated by a blank line, depth-first in entry
+// order. Composes with -a -l -h. Hidden entries (and hidden directories,
+// which are not descended into without -a) follow the same rule as plain
+// ls. Bounded by LS_R_MAX_LINES / LS_R_MAX_CHARS with a trailing notice.
+async function lsRecursive(ctx, paths, flagA, flagL, flagH) {
+  const signal = ctx.opts && ctx.opts.signal;
+  const state = { lines: 0, chars: 0, truncated: false };
+  let out = '';
+  const emitLine = (line) => {
+    if (state.truncated) return false;
+    if (state.lines + 1 > LS_R_MAX_LINES || state.chars + line.length + 1 > LS_R_MAX_CHARS) {
+      state.truncated = true;
+      return false;
+    }
+    state.lines++;
+    state.chars += line.length + 1;
+    return true;
+  };
+  const pushSection = (lines) => {
+    for (const line of lines) {
+      if (!emitLine(line)) return;
+    }
+    out += (out ? '\n\n' : '') + lines.join('\n');
+  };
+  async function walk(abs, disp) {
+    if (state.truncated) return;
+    throwIfCancelled(signal, 'ls');
+    const entries = await ctx.vfs.list(abs);
+    throwIfCancelled(signal, 'ls');
+    const lines = [disp + ':'];
+    const subdirs = [];
+    for (const e of entries) {
+      if (!flagA && e.name.charAt(0) === '.') continue;
+      let est = null;
+      if (flagL) est = await ctx.vfs.stat(joinAbs(abs, e.name));
+      lines.push(lsFormatEntry(e.name, est || { kind: e.kind, size: 0, modified: null }, flagL, flagH));
+      if (e.kind === 'directory') subdirs.push(e.name);
+    }
+    pushSection(lines);
+    for (const name of subdirs) {
+      if (state.truncated) return;
+      await walk(joinAbs(abs, name), joinDisplay(disp, name));
+    }
+  }
+  for (const p of paths) {
+    if (state.truncated) break;
+    let abs;
+    try {
+      abs = resolveShellPath(ctx, p);
+    } catch (e) {
+      return shErr('ls: ' + e.message);
+    }
+    const st = await statShellPath(ctx, p, abs);
+    throwIfCancelled(signal, 'ls');
+    if (st.kind !== 'directory') {
+      pushSection([lsFormatEntry(p, st, flagL, flagH)]);
+      continue;
+    }
+    // The root header is the operand EXACTLY as given (GNU: ls -R dir/ →
+    // "dir/:"); nested headers join the stripped parent with the child name.
+    await walk(abs, p);
+  }
+  if (state.truncated) {
+    out += (out ? '\n\n' : '') + '[ls: recursive listing truncated at the '
+      + LS_R_MAX_LINES + '-line / ' + LS_R_MAX_CHARS + '-character output limit; narrow the path]';
+  }
+  return shOk(out);
 }
 
 function lsFormatEntry(name, st, flagL, flagH) {
@@ -3139,6 +3402,475 @@ async function shSort(ctx, args, stdin) {
     lines = unique;
   }
   return shOk(lines.join('\n'));
+}
+
+// ---------- sed (bounded subset, C5) ----------
+// A deliberately SMALL sed: addresses N, N,M, $, N,$; commands p, d and
+// s/RE/REPL/FLAGS (flags g, N, I; arbitrary delimiter; & and \1-\9).
+// Everything else GNU sed does (a/i/c/y/n/N/D/P/h/H/g/G/x/b/t, regex
+// addresses /re/, `!` negation, {…} blocks, -f scripts, -i backup suffixes)
+// fails LOUDLY with the supported subset in the message — never silently
+// ignored. BRE is the default (translated to JavaScript regex semantics:
+// \( \) \{ \} \+ \? \| are the special forms, unescaped ( ) { } + ? | are
+// literal); -E/-r selects ERE, which maps 1:1 onto JavaScript syntax.
+// POSIX character classes [[:alpha:]] etc. are translated in both modes.
+
+const SED_POSIX_CLASSES = {
+  alpha: 'A-Za-z',
+  digit: '0-9',
+  alnum: 'A-Za-z0-9',
+  upper: 'A-Z',
+  lower: 'a-z',
+  space: ' \\t\\n\\v\\f\\r',
+  xdigit: '0-9A-Fa-f',
+};
+
+function sedPosixClassError(name) {
+  return new Error('unsupported POSIX character class [[:' + name + ':]] (supported: '
+    + Object.keys(SED_POSIX_CLASSES).map((n) => '[[:' + n + ':]]').join(' ') + ')');
+}
+
+// Copy one [...] class (src[i] === '[') translating [:name:] members.
+// A POSIX class [[:name:]] is copied WHOLE (its inner ] must not end the
+// bracket expression). Returns { text, next } with next = index after the
+// closing ].
+function sedCopyClass(src, i) {
+  let j = i + 1;
+  let cls = '';
+  if (src[j] === '^') { cls += '^'; j++; }
+  if (src[j] === ']') { cls += ']'; j++; } // a leading ] is literal
+  while (j < src.length && src[j] !== ']') {
+    if (src[j] === '[' && src[j + 1] === ':') {
+      const end = src.indexOf(':]', j + 2);
+      if (end !== -1) {
+        cls += src.slice(j, end + 2);
+        j = end + 2;
+        continue;
+      }
+    }
+    if (src[j] === '\\' && j + 1 < src.length) { cls += src[j] + src[j + 1]; j += 2; continue; }
+    cls += src[j];
+    j++;
+  }
+  if (j >= src.length) throw new Error('unterminated character class in sed regular expression');
+  // translate [:name:] members inside the class
+  let out = '';
+  let k = 0;
+  while (k < cls.length) {
+    if (cls[k] === '[' && cls[k + 1] === ':') {
+      const end = cls.indexOf(':]', k + 2);
+      if (end !== -1) {
+        const name = cls.slice(k + 2, end);
+        if (!Object.prototype.hasOwnProperty.call(SED_POSIX_CLASSES, name)) throw sedPosixClassError(name);
+        out += SED_POSIX_CLASSES[name];
+        k = end + 2;
+        continue;
+      }
+    }
+    out += cls[k];
+    k++;
+  }
+  return { text: out, next: j + 1 };
+}
+
+// Translate a BRE or ERE pattern into JavaScript RegExp source. In BRE the
+// backslashed forms \( \) \{ \} \+ \? \| carry the special meaning (and map
+// onto JS grouping/quantifiers/alternation) while their unescaped forms are
+// literal; ERE is JavaScript's own grammar, so it passes through with only
+// the POSIX-class translation. All other backslash pairs (\. \* \[ \1-\9
+// \\ …) keep their JS meaning unchanged.
+function sedRegexToJs(src, extended) {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '[') {
+      const cls = sedCopyClass(src, i);
+      out += '[' + cls.text + ']';
+      i = cls.next;
+      continue;
+    }
+    if (c === '\\') {
+      const n = src[i + 1];
+      if (n === undefined) throw new Error('trailing backslash in sed regular expression');
+      if (!extended && '(){}+?|'.indexOf(n) !== -1) { out += n; i += 2; continue; } // BRE special form
+      out += '\\' + n;
+      i += 2;
+      continue;
+    }
+    if (!extended && '(){}+?|'.indexOf(c) !== -1) { out += '\\' + c; i++; continue; } // BRE literal
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+// One parsed sed command: { addr: {start, end} | null, op, ... }.
+// start/end are { n } (line number) or { dollar: true }; a range needs both.
+function sedAddrMatch(addr, lineNo, lastLine) {
+  if (!addr) return true;
+  const from = addr.start.dollar ? lastLine : addr.start.n;
+  if (!addr.end) return lineNo === from;
+  const to = addr.end.dollar ? lastLine : addr.end.n;
+  return lineNo >= from && lineNo <= to;
+}
+
+function sedParseAddress(s, i) {
+  const parseOne = (start) => {
+    if (s[start] === '$') return { part: { dollar: true }, next: start + 1 };
+    let j = start;
+    while (j < s.length && s[j] >= '0' && s[j] <= '9') j++;
+    if (j === start) return null;
+    const n = parseInt(s.slice(start, j), 10);
+    if (n < 1) throw new Error('invalid sed line number ' + s.slice(start, j) + ' (line numbers start at 1)');
+    return { part: { n }, next: j };
+  };
+  const first = parseOne(i);
+  if (!first) return { addr: null, next: i };
+  let j = first.next;
+  while (j < s.length && (s[j] === ' ' || s[j] === '\t')) j++;
+  if (s[j] !== ',') return { addr: { start: first.part, end: null }, next: first.next };
+  j++;
+  while (j < s.length && (s[j] === ' ' || s[j] === '\t')) j++;
+  const second = parseOne(j);
+  if (!second) throw new Error("expected a line number or '$' after ',' in the sed address");
+  return { addr: { start: first.part, end: second.part }, next: second.next };
+}
+
+// Parse the s command (s[i] is the char right after 's'). The delimiter is
+// the next character (any character; the GNU s\D form picks the one after
+// the backslash). Returns { cmd, next }.
+function sedParseSubstitution(s, i, extended) {
+  let delim;
+  if (s[i] === '\\') {
+    i++;
+    delim = s[i];
+    if (delim === undefined) throw new Error('missing delimiter in sed s command');
+  } else {
+    delim = s[i];
+  }
+  if (delim === undefined || delim === '\n' || delim === '\\' || delim === '[') {
+    throw new Error('invalid delimiter in sed s command: ' + String(delim));
+  }
+  const scanPart = (start) => {
+    let parts = '';
+    let j = start;
+    let inClass = false;
+    while (j < s.length) {
+      const c = s[j];
+      if (c === '\\' && j + 1 < s.length) { parts += c + s[j + 1]; j += 2; continue; }
+      if (c === '\\' ) throw new Error('trailing backslash in sed s command');
+      if (!inClass && c === '[') { inClass = true; parts += c; j++; continue; }
+      if (inClass && c === ']') { inClass = false; parts += c; j++; continue; }
+      if (!inClass && c === delim) return { text: parts, next: j + 1 };
+      parts += c;
+      j++;
+    }
+    throw new Error("missing closing '" + delim + "' in sed s command");
+  };
+  const rePart = scanPart(i + 1);
+  if (!rePart.text) throw new Error('empty regular expression in sed s command is not supported (repeat the pattern)');
+  const replPart = scanPart(rePart.next);
+  // flags: g (global), a number N (replace the Nth occurrence), I (case-
+  // insensitive). Combined g+N means g (the number is ignored, like GNU).
+  let global = false;
+  let nth = 0;
+  let icase = false;
+  let j = replPart.next;
+  while (j < s.length && s[j] !== ';' && s[j] !== ' ' && s[j] !== '\t' && s[j] !== '\n') {
+    const f = s[j];
+    if (f === 'g') global = true;
+    else if (f === 'I') icase = true;
+    else if (f >= '0' && f <= '9') {
+      let k = j;
+      while (k < s.length && s[k] >= '0' && s[k] <= '9') k++;
+      nth = parseInt(s.slice(j, k), 10);
+      if (nth < 1) throw new Error('invalid occurrence number in sed s flags (starts at 1)');
+      j = k - 1;
+    } else {
+      throw new Error("unsupported sed s flag: '" + f + "' (supported flags: g, a number N, I)");
+    }
+    j++;
+  }
+  const baseFlags = icase ? 'i' : '';
+  let reSource;
+  try {
+    reSource = sedRegexToJs(rePart.text, extended);
+  } catch (e) {
+    throw new Error('sed s command: ' + e.message);
+  }
+  let re;
+  try {
+    re = new RegExp(reSource, baseFlags);
+  } catch (e) {
+    throw new Error('invalid regular expression in sed s command: ' + e.message);
+  }
+  let reAll;
+  try {
+    reAll = new RegExp(reSource, baseFlags + 'g');
+  } catch (e) {
+    throw new Error('invalid regular expression in sed s command: ' + e.message);
+  }
+  return {
+    cmd: {
+      op: 's',
+      re: re,
+      reAll: reAll,
+      repl: replPart.text,
+      delim: delim,
+      global: global,
+      nth: !global && nth > 0 ? nth : 0,
+    },
+    next: j,
+  };
+}
+
+// Parse one sed script string (from -e or the positional) into commands.
+function sedParseScript(script, extended) {
+  const commands = [];
+  let i = 0;
+  const s = String(script || '');
+  while (i < s.length) {
+    while (i < s.length && (s[i] === ';' || s[i] === ' ' || s[i] === '\t' || s[i] === '\n')) i++;
+    if (i >= s.length) break;
+    let addr = null;
+    const parsed = sedParseAddress(s, i);
+    if (parsed.addr) addr = parsed.addr;
+    i = parsed.next;
+    while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
+    if (i >= s.length) throw new Error('sed command expected after the address');
+    const op = s[i];
+    if (op === '!') throw new Error("sed address negation '!' is not supported (supported: addresses N, N,M, $, N,$ with commands p d s)");
+    if (op === '/') throw new Error('sed regex addresses (/re/) are not supported (supported addresses: N, N,M, $, N,$)');
+    if (op === 'p' || op === 'd') {
+      i++;
+      if (i < s.length && s[i] !== ';' && s[i] !== ' ' && s[i] !== '\t' && s[i] !== '\n') {
+        throw new Error("unexpected characters after sed command '" + op + "' (multiple commands: separate with ; or -e)");
+      }
+      commands.push({ addr: addr, op: op });
+      continue;
+    }
+    if (op === 's') {
+      const sub = sedParseSubstitution(s, i + 1, extended);
+      sub.cmd.addr = addr;
+      commands.push(sub.cmd);
+      i = sub.next;
+      continue;
+    }
+    throw new Error("unsupported sed command '" + op + "' (supported: p, d, s/RE/REPL/FLAGS with addresses N, N,M, $, N,$)");
+  }
+  return commands;
+}
+
+// Expand the s replacement template: & → the whole match, \1-\9 → capture
+// groups, \n \t, \<delimiter> and \\ literal, unknown \<char> → char.
+function sedExpandRepl(tpl, delim, match, groups) {
+  let out = '';
+  for (let i = 0; i < tpl.length; i++) {
+    const c = tpl[i];
+    if (c === '&') { out += match; continue; }
+    if (c === '\\') {
+      const n = tpl[i + 1];
+      i++;
+      if (n === undefined) { out += '\\'; continue; }
+      if (n >= '1' && n <= '9') { out += (groups && groups[n - 1]) || ''; continue; }
+      if (n === 'n') { out += '\n'; continue; }
+      if (n === 't') { out += '\t'; continue; }
+      out += n; // \& → &, \\ → \, \/ → the delimiter, others: the char itself
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
+
+function sedApplySub(cmd, line) {
+  if (cmd.global) {
+    return line.replace(cmd.reAll, function (m) {
+      const rest = Array.prototype.slice.call(arguments, 1);
+      const groups = rest.slice(0, rest.length - 2);
+      return sedExpandRepl(cmd.repl, cmd.delim, m, groups);
+    });
+  }
+  if (!cmd.nth) {
+    return line.replace(cmd.re, function (m) {
+      const rest = Array.prototype.slice.call(arguments, 1);
+      const groups = rest.slice(0, rest.length - 2);
+      return sedExpandRepl(cmd.repl, cmd.delim, m, groups);
+    });
+  }
+  // Nth-occurrence replacement: scan with the global regex, keep everything
+  // before the Nth match, replace that one occurrence, keep the rest.
+  const re = cmd.reAll;
+  re.lastIndex = 0;
+  let out = '';
+  let last = 0;
+  let n = 0;
+  let m;
+  while ((m = re.exec(line)) !== null) {
+    n++;
+    if (n === cmd.nth) {
+      const groups = m.slice(1);
+      out += line.slice(last, m.index) + sedExpandRepl(cmd.repl, cmd.delim, m[0], groups);
+      last = m.index + m[0].length;
+      break;
+    }
+    if (m[0].length === 0) re.lastIndex++;
+  }
+  if (n < cmd.nth) return line; // fewer occurrences than N: line unchanged
+  return out + line.slice(last);
+}
+
+// Process the already-split lines; returns the output text with GNU sed's
+// trailing-newline rule: the output ends with a newline iff the input did,
+// or the last emitted line is not the input's last line.
+function sedRunLines(lines, commands, opts) {
+  const quiet = !!(opts && opts.quiet);
+  const lastLine = lines.length;
+  const emits = []; // { text, lineNo }
+  for (let idx = 1; idx <= lastLine; idx++) {
+    let line = lines[idx - 1];
+    let deleted = false;
+    for (const cmd of commands) {
+      if (!sedAddrMatch(cmd.addr, idx, lastLine)) continue;
+      if (cmd.op === 'p') emits.push({ text: line, lineNo: idx });
+      else if (cmd.op === 'd') { deleted = true; break; }
+      else if (cmd.op === 's') line = sedApplySub(cmd, line);
+    }
+    if (!deleted && !quiet) emits.push({ text: line, lineNo: idx });
+  }
+  let out = emits.map((e) => e.text).join('\n');
+  const trailing = (opts && opts.hadTrailingNewline)
+    || (emits.length && emits[emits.length - 1].lineNo !== lastLine);
+  if (out.length && trailing) out += '\n';
+  return out;
+}
+
+async function shSed(ctx, args, stdin) {
+  const signal = ctx.opts && ctx.opts.signal;
+  let flagN = false;
+  let flagI = false;
+  let extended = false;
+  const scriptArgs = [];
+  const positionals = [];
+  for (let k = 0; k < args.length; k++) {
+    const t = args[k];
+    if (!t.quoted && t.text.length > 1 && t.text.charAt(0) === '-') {
+      if (t.text === '-e') {
+        const v = args[++k];
+        if (!v) return shErr('sed: -e requires a script argument');
+        scriptArgs.push(v.text);
+        continue;
+      }
+      if (t.text === '-E' || t.text === '-r') { extended = true; continue; }
+      if (/^-[nriE]+$/.test(t.text)) {
+        for (const ch of t.text.slice(1)) {
+          if (ch === 'n') flagN = true;
+          else if (ch === 'i') flagI = true;
+          else extended = true;
+        }
+        continue;
+      }
+      return shErr('sed: unsupported option: ' + t.text + ' (supported: -n, -e SCRIPT, -i, -E, -r)');
+    }
+    positionals.push(t.text);
+  }
+  let scripts = scriptArgs.slice();
+  let filePaths;
+  if (scripts.length) {
+    filePaths = positionals;
+  } else {
+    if (!positionals.length) {
+      return shErr('usage: sed [-n] [-e SCRIPT]... [-i] [-E|-r] [SCRIPT] [file...]');
+    }
+    scripts = [positionals[0]];
+    filePaths = positionals.slice(1);
+  }
+  // Parse ALL scripts before touching any file: a bad command never leaves
+  // a half-processed input behind.
+  let commands = [];
+  try {
+    for (const sc of scripts) commands = commands.concat(sedParseScript(sc, extended));
+  } catch (e) {
+    return shErr('sed: ' + e.message);
+  }
+  if (!commands.length) return shErr('sed: empty script (supported: p, d, s/RE/REPL/FLAGS)');
+
+  if (flagI) {
+    if (!filePaths.length) return shErr('sed: -i requires a file operand');
+    // In-place editing (GNU semantics: each file is processed separately,
+    // addresses and $ are per file). Every target is validated and checked
+    // for writability BEFORE any processing — one refusal fails the whole
+    // command with zero side effects.
+    const targets = [];
+    for (const p of filePaths) {
+      let abs;
+      try {
+        abs = resolveShellPath(ctx, p);
+      } catch (e) {
+        return shErr('sed: ' + e.message);
+      }
+      const st = await statShellPath(ctx, p, abs);
+      throwIfCancelled(signal, 'sed');
+      if (st.kind !== 'file') return shErr('sed: ' + p + ': is a directory');
+      if (st.size > SED_MAX_INPUT_BYTES) {
+        return shErr('sed: ' + p + ': file over the ' + SED_MAX_INPUT_BYTES + '-byte sed input limit (use python)');
+      }
+      try {
+        ctx.vfs.assertWritable(abs);
+      } catch (e) {
+        return shErr('sed: ' + p + ': cannot write in place: ' + writableErrMsg(e));
+      }
+      targets.push({ display: p, abs: abs });
+    }
+    for (const target of targets) {
+      throwIfCancelled(signal, 'sed');
+      const content = await ctx.vfs.read(target.abs);
+      const hadTrailingNewline = /\n$/.test(content);
+      const lines = hadTrailingNewline ? content.slice(0, -1).split('\n') : content.split('\n');
+      const out = content.length
+        ? sedRunLines(lines, commands, { quiet: flagN, hadTrailingNewline: hadTrailingNewline })
+        : '';
+      if (out !== content) await ctx.vfs.write(target.abs, out);
+    }
+    return shOk('');
+  }
+
+  // Stream mode: multiple files are concatenated into ONE line stream (GNU
+  // default — line numbers and $ span all files).
+  let content = null;
+  if (filePaths.length) {
+    const chunks = [];
+    for (const p of filePaths) {
+      let abs;
+      try {
+        abs = resolveShellPath(ctx, p);
+      } catch (e) {
+        return shErr('sed: ' + e.message);
+      }
+      const st = await statShellPath(ctx, p, abs);
+      throwIfCancelled(signal, 'sed');
+      if (st.kind !== 'file') return shErr('sed: ' + p + ': is a directory');
+      if (st.size > SED_MAX_INPUT_BYTES) {
+        return shErr('sed: ' + p + ': file over the ' + SED_MAX_INPUT_BYTES + '-byte sed input limit (use python)');
+      }
+      chunks.push(await ctx.vfs.read(abs));
+    }
+    content = chunks.join('');
+  } else {
+    if (stdin === null || stdin === undefined) {
+      return shErr('sed: missing file operand (or pipe input into sed)');
+    }
+    content = stdin;
+  }
+  const hadTrailingNewline = /\n$/.test(content);
+  const lines = content.length ? (hadTrailingNewline ? content.slice(0, -1).split('\n') : content.split('\n')) : [];
+  let out = sedRunLines(lines, commands, { quiet: flagN, hadTrailingNewline: hadTrailingNewline });
+  if (out.length > SED_MAX_OUTPUT_CHARS) {
+    out = out.slice(0, SED_MAX_OUTPUT_CHARS)
+      + '\n[sed: output truncated at the ' + SED_MAX_OUTPUT_CHARS + '-character terminal limit; narrow the input or use python]';
+  }
+  return shOk(out);
 }
 
 // ---------- which ----------
@@ -3933,11 +4665,46 @@ async function runShellCommand(input, workspace, opts) {
     return { output: output, isError: !r.success, io: r.io };
   }
 
+  // A python heredoc COMBINED with other commands (cd x && python <<'PY',
+  // python <<'PY' … PY; ls) stays unsupported — refused with the actionable
+  // message BEFORE heredoc extraction, so the guidance wins even when the
+  // terminator is missing. The standalone python heredoc above is unchanged.
+  const owner = shellHeredocOwnerWord(line.split('\n')[0].replace(/\r$/, ''));
+  if (owner && (SHELL_ALIASES[owner] || owner) === 'python') {
+    const msg = 'bash: a python heredoc must be the ONLY command of its bash invocation'
+      + ' (run preceding and following commands in separate bash calls;'
+      + ' resolve paths inside Python with absolute paths or os.chdir)';
+    return { output: msg, isError: true, io: ioOf(msg) };
+  }
+
+  // Generic heredoc (exactly one per command line) is extracted from the
+  // raw input before tokenizing; the body rides on the parsed simple
+  // command as stdinText and reaches it through the SHELL_HEREDOC_TOKEN
+  // placeholder.
+  let hd = null;
+  try {
+    hd = extractShellHeredoc(line);
+  } catch (e) {
+    const msg = 'bash: ' + e.message;
+    return { output: msg, isError: true, io: ioOf(msg) };
+  }
+
   let steps;
   try {
-    steps = parseShellLine(shellTokenize(line));
+    steps = parseShellLine(shellTokenize(hd ? hd.line : line));
   } catch (e) {
     return { output: 'bash: ' + e.message, isError: true, io: ioOf('bash: ' + e.message) };
+  }
+  if (hd) {
+    for (const step of steps) {
+      for (const c of step.pipeline) {
+        for (const t of c.argv) {
+          if (!t.op && !t.quoted && t.text === SHELL_HEREDOC_TOKEN) {
+            c.stdinText = hd.body;
+          }
+        }
+      }
+    }
   }
   if (!steps.length) return { output: '', isError: false, io: ioOf('') };
 
@@ -4036,6 +4803,8 @@ async function runPipeline(pipeline, ctx) {
 // Execute one simple command: resolve the handler, extract redirections
 // (applied LEFT TO RIGHT — `> all.txt 2>&1` and `2>&1 > out.txt` differ),
 // run the command, then deliver its stdout/stderr through the routing state.
+// stdin sources, last one wins: pipeline stdin < `< file` redirect < heredoc
+// body (SHELL_HEREDOC_TOKEN placeholder, resolved from cmd.stdinText).
 async function runSimpleCommand(cmd, ctx, stdin) {
   const argv = cmd.argv;
   const rawName = argv[0].text;
@@ -4047,9 +4816,18 @@ async function runSimpleCommand(cmd, ctx, stdin) {
   // stderr: same, plus {kind:'merge-stdout'} (2>&1 while stdout was captured)
   const args = [];
   const route = { stdout: { kind: 'capture' }, stderr: { kind: 'capture' } };
+  let cmdStdin; // explicit stdin source: `< file` or the heredoc body
   for (let i = 1; i < argv.length; i++) {
     const t = argv[i];
-    if (!t.op) { args.push(t); continue; }
+    if (!t.op) {
+      if (!t.quoted && t.text === SHELL_HEREDOC_TOKEN) {
+        if (typeof cmd.stdinText !== 'string') return shErr('bash: heredoc without a command');
+        cmdStdin = cmd.stdinText;
+        continue;
+      }
+      args.push(t);
+      continue;
+    }
     if (t.text === '2>&1') {
       // stderr inherits stdout's CURRENT destination — a snapshot, so a later
       // `> file` does not retroactively move stderr. All three destination
@@ -4060,6 +4838,40 @@ async function runSimpleCommand(cmd, ctx, stdin) {
         : route.stdout.kind === 'null'
           ? { kind: 'null' }
           : { kind: 'merge-stdout' };
+      continue;
+    }
+    if (t.text === '<') {
+      const target = argv[++i];
+      if (!target || target.op) return shErr('bash: missing redirect target after \'<\'');
+      if (name === 'python') {
+        return shErr("bash: python: '<' input redirection is not supported for python"
+          + " (use 'python <script.py>' or a python heredoc: python <<'PY' ... PY)");
+      }
+      let abs;
+      try {
+        abs = resolveShellPath(ctx, target.text);
+      } catch (e) {
+        return shErr('bash: ' + e.message);
+      }
+      let st;
+      try {
+        st = await statShellPath(ctx, target.text, abs);
+      } catch (e) {
+        return shErr('bash: ' + e.message);
+      }
+      if (st.kind !== 'file') return shErr('bash: ' + name + ': ' + target.text + ': is a directory');
+      if (st.size > SHELL_PIPE_MAX_BYTES) {
+        return shErr('bash: ' + name + ': ' + target.text + ': input file over the '
+          + SHELL_PIPE_MAX_BYTES + '-byte stdin-redirect limit (use python to process large files)');
+      }
+      throwIfCancelled(ctx.opts && ctx.opts.signal, name);
+      let text;
+      try {
+        text = await ctx.vfs.read(abs);
+      } catch (e) {
+        return shErr('bash: ' + name + ': ' + target.text + ': ' + writableErrMsg(e));
+      }
+      cmdStdin = text;
       continue;
     }
     const target = argv[++i];
@@ -4093,6 +4905,11 @@ async function runSimpleCommand(cmd, ctx, stdin) {
     else route.stdout = dest;
   }
 
+  // Explicit stdin (`< file` / heredoc) overrides pipeline stdin, like a
+  // real shell. The "does not read stdin" guard keeps guarding PIPELINE
+  // input only: `ls < f` is ordinary POSIX (the stdin goes unread), while
+  // python refuses `<` outright with its own actionable message above.
+  const effectiveStdin = cmdStdin !== undefined ? cmdStdin : stdin;
   let res;
   if (!spec) {
     // Even an unknown command's error is stderr and routes like stderr.
@@ -4101,7 +4918,7 @@ async function runSimpleCommand(cmd, ctx, stdin) {
     res = shErr('bash: ' + name + ': does not read stdin (pipeline input has nowhere to go)');
   } else {
     try {
-      res = await spec.run(ctx, args, stdin);
+      res = await spec.run(ctx, args, effectiveStdin);
     } catch (e) {
       if (isCancelledError(e)) throw e;
       // Handler failures are the command's stderr — redirection applies to
@@ -4199,6 +5016,72 @@ function pythonOpts(ctx) {
   return Object.assign({}, ctx.opts, { cwd: ctx.cwd });
 }
 
+// ---------- python traceback denoising (C5) ----------
+// Pyodide prefixes user tracebacks with its own internal frames
+// (/lib/python312.zip/_pyodide/_base.py → eval_code_async → …), which cost
+// the model tool calls to read past. The presentation copy collapses every
+// Pyodide-internal frame that precedes the FIRST user frame (<exec>, user
+// file paths) into one marker line — together with the "Traceback (most
+// recent call last):" header, so the display starts with the marker — and
+// keeps user frames and the final exception line(s) verbatim. The error
+// object and the raw worker result are untouched: this rewrites ONLY the
+// text shown to the model and the UI, and only when there is something to
+// hide (a traceback with no leading internal frames returns unchanged).
+const PY_TRACEBACK_HEADER = 'Traceback (most recent call last):';
+const PY_TRACEBACK_FRAME = /^ {2}File "((?:[^"\\]|\\.)*)", line \d+(?:, in .*)?$/;
+const PY_CHAINED_HEADERS = [
+  'During handling of the above exception, another exception occurred:',
+  'The above exception was the direct cause of the following exception:',
+];
+// Pyodide's own frames live under _pyodide/ (_base.py, _importhook, …);
+// stdlib frames (/lib/python312.zip/json/…) are NOT internal and stay.
+function isPyodideInternalFrame(file) {
+  return /(^|[\\/])_pyodide[\\/]/.test(String(file || ''));
+}
+
+function denoisePyodideTraceback(text) {
+  const s = String(text || '');
+  if (s.indexOf(PY_TRACEBACK_HEADER) === -1) return s;
+  const lines = s.split('\n');
+  const out = [];
+  let i = 0;
+  let changed = false;
+  while (i < lines.length) {
+    if (lines[i] !== PY_TRACEBACK_HEADER) { out.push(lines[i]); i++; continue; }
+    // Collect the frame groups of this traceback block: a frame starts at a
+    // `  File "…", line N` line; indented continuation lines (source text,
+    // SyntaxError carets) belong to it. A column-0 line (the exception, a
+    // chained-exception header, a blank line) ends the block's frames.
+    const groups = [];
+    let j = i + 1;
+    while (j < lines.length) {
+      const m = PY_TRACEBACK_FRAME.exec(lines[j]);
+      if (!m) break;
+      const group = { file: m[1], lines: [lines[j]] };
+      j++;
+      while (j < lines.length && lines[j] !== '' && /^\s/.test(lines[j])
+        && !PY_TRACEBACK_FRAME.test(lines[j])
+        && PY_CHAINED_HEADERS.indexOf(lines[j]) === -1) {
+        group.lines.push(lines[j]);
+        j++;
+      }
+      groups.push(group);
+    }
+    let k = 0;
+    while (k < groups.length && isPyodideInternalFrame(groups[k].file)) k++;
+    if (k === 0) {
+      out.push(lines[i]);
+      for (const g of groups) out.push(...g.lines);
+    } else {
+      out.push('[Locus: ' + k + ' internal Pyodide frames hidden]');
+      for (let g2 = k; g2 < groups.length; g2++) out.push(...groups[g2].lines);
+      changed = true;
+    }
+    i = j;
+  }
+  return changed ? out.join('\n') : s;
+}
+
 async function runPythonCode(code, vfs, opts) {
   if (!code || !code.trim()) {
     return { success: false, stdout: '', stderr: 'python: empty code', io: { in: 0, out: 0 } };
@@ -4224,12 +5107,15 @@ async function runPythonCode(code, vfs, opts) {
   }
 
   // stdout carries normal output + commit reports; stderr carries Python's
-  // own stderr, execution errors and every commit-failure note.
+  // own stderr, execution errors and every commit-failure note. The error
+  // text is the presentation copy: Pyodide-internal traceback frames are
+  // collapsed here (denoisePyodideTraceback) — the worker result and the
+  // exception semantics stay untouched.
   const outParts = [];
   const errParts = [];
   if (res.stdout) outParts.push(res.stdout.replace(/\n$/, ''));
   if (res.stderr) errParts.push(res.stderr.replace(/\n$/, ''));
-  if (res.error) errParts.push(res.error);
+  if (res.error) errParts.push(denoisePyodideTraceback(res.error));
   if (res.stdoutTruncated) {
     outParts.push('[python output limit: stdout truncated]');
   }
@@ -4623,4 +5509,5 @@ export {
   parseShellLine,
   runPipeline,
   collectWorkspaceFiles,
+  denoisePyodideTraceback,
 };
