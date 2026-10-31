@@ -42,7 +42,7 @@ const http = require('http');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const {
-  allocateFreePort, closeChrome, connectToTarget, launchChrome, waitForCdp,
+  allocateFreePort, closeChrome, connectToTarget, launchChrome, listenWithRetry, waitForCdp,
   waitForPageTarget, waitForRuntimeCondition,
 } = require('./chrome-driver.cjs');
 const contract = require('./lifecycle-contract.cjs');
@@ -106,9 +106,11 @@ async function main() {
 
     // 2. serve dist (static only — no network scenario runs here)
     const distRoot = path.join(ROOT, 'dist');
-    const port = await allocateFreePort();
     const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css' };
-    server = http.createServer(async (req, res) => {
+    // allocateFreePort has a release/rebind race: the bind goes through
+    // listenWithRetry so an EADDRINUSE retries on a freshly allocated port
+    // (at most 3 times) before any check runs.
+    const bound = await listenWithRetry(() => http.createServer(async (req, res) => {
       try {
         const u = new URL(req.url, 'http://127.0.0.1');
         let rel = decodeURIComponent(u.pathname).replace(/^\/+/, '');
@@ -122,9 +124,9 @@ async function main() {
       } catch (e) {
         res.statusCode = 500; res.end('server error');
       }
-    });
-    await new Promise((r) => server.listen(port, '127.0.0.1', r));
-    const url = 'http://127.0.0.1:' + port + '/';
+    }), await allocateFreePort());
+    server = bound.server;
+    const url = 'http://127.0.0.1:' + bound.port + '/';
 
     // 3. drive the page
     profileDir = await fs.mkdtemp(path.join(require('os').tmpdir(), 'locus-selfcheck-'));
@@ -134,7 +136,7 @@ async function main() {
       profileDir,
       extraArgs: ['--window-size=1280,800'],
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, url, { timeoutMs: 15000 });
     const cdp = await connectToTarget(target);
     await waitForRuntimeCondition(cdp, '!!(window.__consumer && window.__consumer.ready)',
