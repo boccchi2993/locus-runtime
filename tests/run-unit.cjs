@@ -31,6 +31,11 @@ const SUITES = [
   'runtime-standalone.test.mjs',
   'runtime-import-purity.test.mjs',
   'runtime-session-lifecycle.test.mjs',
+  // chrome helper infrastructure (test/ci-port-chrome-readiness): the
+  // DevToolsActivePort parsing and the EADDRINUSE service-port retry
+  // ported from product PR #52 — parsing (normal / CRLF / missing second
+  // line / malformed), the late-file waitForCdp path and the retry shapes
+  'chrome-helper.test.cjs',
   'runtime-boundary.test.cjs',
 ];
 

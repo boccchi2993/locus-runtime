@@ -38,7 +38,7 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const {
-  allocateFreePort, closeChrome, connectToTarget, launchChrome, waitForCdp,
+  allocateFreePort, closeChrome, connectToTarget, launchChrome, listenWithRetry, waitForCdp,
   waitForPageTarget, waitForRuntimeCondition,
 } = require('./helpers/chrome.cjs');
 
@@ -498,10 +498,17 @@ async function main() {
     res.setHeader('content-type', 'text/plain');
     res.end('probe-hit');
   });
-  portA = await allocateFreePort();
-  portB = await allocateFreePort();
-  await new Promise((r) => serverA = makeServer('A', true).listen(portA, '127.0.0.1', r));
-  await new Promise((r) => serverB = makeServer('B', false).listen(portB, '127.0.0.1', r));
+  // allocateFreePort has a release/rebind race: both binds go through
+  // listenWithRetry (makeServer returns a FRESH server per attempt, and
+  // the page builder reads portA/portB at request time) so an EADDRINUSE
+  // retries on a freshly allocated port (at most 3 times) before any
+  // gate check runs.
+  const boundA = await listenWithRetry(() => makeServer('A', true), await allocateFreePort());
+  serverA = boundA.server;
+  portA = boundA.port;
+  const boundB = await listenWithRetry(() => makeServer('B', false), await allocateFreePort());
+  serverB = boundB.server;
+  portB = boundB.port;
   const controlHits = (suffix) => hits.filter((h) => h.path === '/control' + suffix).length;
   const strictProbeTotal = () => hits.filter((h) => h.path.startsWith('/probe-')).length;
   const assetServerHits = () => hits.filter((h) => h.path.startsWith('/assets/')).length;
@@ -525,7 +532,7 @@ async function main() {
         profileDir,
         extraArgs: ['--window-size=1280,800'],
       });
-      await waitForCdp(chrome, { timeoutMs: 15000 });
+      await waitForCdp(chrome);
       const target = await waitForPageTarget(chrome, pageUrl, { timeoutMs: 15000 });
       cdp = await connectToTarget(target);
 
