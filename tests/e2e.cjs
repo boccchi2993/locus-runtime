@@ -16,8 +16,10 @@ const {
   allocateFreePort,
   closeChrome,
   closeManagedProcess,
+  isProcessAlive,
   launchChrome,
   launchManagedProcess,
+  startServiceWithRetry,
   waitForCdp,
   waitForHttp,
   waitForPageTarget,
@@ -35,13 +37,36 @@ async function runtimeHostE2e() {
   console.log('=== standalone runtime host e2e (tests/e2e-runtime-host.cjs) ===');
   const build = spawnSync(process.execPath, [VITE_CLI, 'build'], { stdio: 'inherit', cwd: ROOT });
   if (build.status !== 0) return false;
-  const port = await allocateFreePort();
-  const preview = launchManagedProcess(process.execPath, [
-    VITE_CLI, 'preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort',
-  ], { cwd: ROOT, port, label: 'runtime-host Vite preview', env: process.env });
-  const appRoot = `http://127.0.0.1:${port}/`;
+  // allocateFreePort has a release/rebind race, and --strictPort kills the
+  // preview child before readiness when it loses that race: the bind goes
+  // through startServiceWithRetry so an EADDRINUSE re-spawns on a freshly
+  // allocated port (at most 3 times) BEFORE any gate runs, and the host
+  // URL follows the port actually bound.
+  let preview = null;
   try {
-    await waitForHttp(`${appRoot}tests/runtime-host.html`, { process: preview, timeoutMs: 15000 });
+    const service = await startServiceWithRetry(async (port) => {
+      const child = launchManagedProcess(process.execPath, [
+        VITE_CLI, 'preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort',
+      ], { cwd: ROOT, port, label: 'runtime-host Vite preview', env: process.env });
+      try {
+        await waitForHttp(`http://127.0.0.1:${port}/tests/runtime-host.html`, { process: child, timeoutMs: 15000 });
+      } catch (e) {
+        // Retry ONLY the bind race: the child died with EADDRINUSE in its
+        // output. Any other readiness failure is rethrown untouched.
+        const raced = !isProcessAlive(child)
+          && /EADDRINUSE|address already in use/.test(child.stderrTail + '\n' + child.stdoutTail);
+        await closeManagedProcess(child);
+        if (raced) {
+          const bindError = new Error('vite preview could not bind port ' + port + ' (EADDRINUSE)');
+          bindError.code = 'EADDRINUSE';
+          throw bindError;
+        }
+        throw e;
+      }
+      return child;
+    }, await allocateFreePort());
+    preview = service.handle;
+    const appRoot = `http://127.0.0.1:${service.port}/`;
     const env = { ...process.env, E2E_HOST_URL: `${appRoot}tests/runtime-host.html` };
     const r = spawnSync(process.execPath, [path.join(__dirname, 'e2e-runtime-host.cjs')], {
       stdio: 'inherit', env,
@@ -51,8 +76,10 @@ async function runtimeHostE2e() {
     console.error(error && error.stack || error);
     return false;
   } finally {
-    const cleanup = await closeManagedProcess(preview);
-    if (!cleanup.exited) console.error('runtime-host Vite preview did not exit after bounded cleanup');
+    if (preview) {
+      const cleanup = await closeManagedProcess(preview);
+      if (!cleanup.exited) console.error('runtime-host Vite preview did not exit after bounded cleanup');
+    }
   }
 }
 

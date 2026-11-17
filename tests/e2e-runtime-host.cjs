@@ -60,7 +60,7 @@ async function main() {
       label: 'runtime-host Chrome',
       profileDir,
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, HOST_URL, { timeoutMs: 15000 });
     cdp = await connectToTarget(target);
     await waitForRuntimeCondition(cdp, 'document.title === "runtime-host-ready"',

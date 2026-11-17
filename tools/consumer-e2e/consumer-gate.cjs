@@ -60,7 +60,7 @@ const path = require('path');
 const { createRequire } = require('module');
 const { spawnSync } = require('child_process');
 const {
-  allocateFreePort, closeChrome, connectToTarget, launchChrome, waitForCdp,
+  allocateFreePort, closeChrome, connectToTarget, launchChrome, listenWithRetry, waitForCdp,
   waitForPageTarget, waitForRuntimeCondition,
 } = require('./chrome-driver.cjs');
 const contract = require('./lifecycle-contract.cjs');
@@ -75,7 +75,6 @@ const NET_TARGET = 'https://consumer-gate-counted.test';
 
 async function serveDist() {
   const distRoot = path.join(ROOT, 'dist');
-  const port = await allocateFreePort();
   const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css' };
   // F3/C6: relay-stub counter. The runtime routes cross-origin
   // side-effecting requests through the SAME-ORIGIN POST /fetch envelope
@@ -85,7 +84,10 @@ async function serveDist() {
   // anywhere and leaves every other path (including /fetch for any other
   // target) exactly as it was — 404.
   const relay = { hits: [] };
-  const server = http.createServer(async (req, res) => {
+  // allocateFreePort has a release/rebind race: the bind goes through
+  // listenWithRetry so an EADDRINUSE retries on a freshly allocated port
+  // (at most 3 times) before any gate check runs.
+  const { server, port } = await listenWithRetry(() => http.createServer(async (req, res) => {
     try {
       const u = new URL(req.url, 'http://127.0.0.1');
       if (u.pathname === '/fetch' && req.method === 'POST') {
@@ -112,8 +114,7 @@ async function serveDist() {
     } catch (e) {
       res.statusCode = 500; res.end('server error');
     }
-  });
-  await new Promise((r) => server.listen(port, '127.0.0.1', r));
+  }), await allocateFreePort());
   return { url: 'http://127.0.0.1:' + port + '/', server, relay };
 }
 
@@ -172,7 +173,7 @@ async function main() {
       profileDir,
       extraArgs: ['--window-size=1280,800'],
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, served.url, { timeoutMs: 15000 });
     const cdp = await connectToTarget(target);
     await waitForRuntimeCondition(cdp, '!!(window.__consumer && window.__consumer.ready)',

@@ -12,7 +12,7 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const {
-  allocateFreePort, closeChrome, connectToTarget, launchChrome, waitForCdp,
+  allocateFreePort, closeChrome, connectToTarget, launchChrome, listenWithRetry, waitForCdp,
   waitForPageTarget, waitForRuntimeCondition,
 } = require('./helpers/chrome.cjs');
 
@@ -23,9 +23,11 @@ const HOST_URL = process.env.E2E_HOST_URL || null;
 
 async function serveDist() {
   const distRoot = path.join(__dirname, '..', 'dist');
-  const port = await allocateFreePort();
   const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.json': 'application/json' };
-  const server = http.createServer(async (req, res) => {
+  // allocateFreePort has a release/rebind race: the bind goes through
+  // listenWithRetry so an EADDRINUSE retries on a freshly allocated port
+  // (at most 3 times) before any gate check runs.
+  const { server, port } = await listenWithRetry(() => http.createServer(async (req, res) => {
     try {
       const u = new URL(req.url, 'http://127.0.0.1');
       let rel = decodeURIComponent(u.pathname).replace(/^\/+/, '');
@@ -39,8 +41,7 @@ async function serveDist() {
     } catch (e) {
       res.statusCode = 500; res.end('server error');
     }
-  });
-  await new Promise((r) => server.listen(port, '127.0.0.1', r));
+  }), await allocateFreePort());
   return { url: 'http://127.0.0.1:' + port + '/tests/runtime-host.html', server };
 }
 
@@ -144,7 +145,7 @@ async function main() {
       profileDir,
       extraArgs: ['--window-size=1440,900'],
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, appUrl, { timeoutMs: 15000 });
     cdp = await connectToTarget(target);
     await waitForRuntimeCondition(cdp,

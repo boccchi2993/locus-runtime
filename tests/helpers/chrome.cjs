@@ -6,7 +6,17 @@ const path = require('path');
 const { execFile } = require('child_process');
 const { spawn } = require('child_process');
 
+// Readiness budgets. DEFAULT_TIMEOUT_MS stays the generic poll budget
+// (server readiness, page targets, runtime conditions). Waiting for CHROME
+// itself to come up is the one budget that raced CI: the runner's first
+// cold start has been observed to need >15s before the debug endpoint
+// answers (see RT-CI-001 in TODO.md — CDP readiness timeouts at phase=cdp
+// elapsedMs≈15000/15186-class signatures on runs 36987973661 and
+// 37461978810). DEFAULT_CDP_TIMEOUT_MS applies ONLY to waitForCdp — no
+// product-assertion timeout is touched. (Ported from the product
+// repository's tests/helpers/chrome.cjs, PR "test/ci-stability".)
 const DEFAULT_TIMEOUT_MS = 15000;
+const DEFAULT_CDP_TIMEOUT_MS = 60000;
 const DEFAULT_POLL_INTERVAL_MS = 100;
 const OUTPUT_TAIL_LINES = 80;
 const OUTPUT_TAIL_CHARS = 12000;
@@ -152,6 +162,15 @@ async function closeChrome(handle, options = {}) {
   return closeManagedProcess(handle, options);
 }
 
+// NOTE: racy by design — listen(0) reserves a port, close() releases it,
+// and between the release and the consumer's bind ANOTHER process can take
+// the port (the same release/rebind race product measured on CI as
+// EADDRINUSE 127.0.0.1:33221 in e2e-credentials.cjs). Only use it for
+// SERVICE ports (test http servers, per-suite vite preview), and always
+// pair the bind with listenWithRetry() / startServiceWithRetry() so an
+// EADDRINUSE retries on a freshly allocated port. Chrome's debug port must
+// NOT go through here at all — launchChrome passes
+// --remote-debugging-port=0 and lets Chrome pick + report its own port.
 function allocateFreePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -162,6 +181,122 @@ function allocateFreePort() {
       server.close((error) => error ? reject(error) : resolve(port));
     });
   });
+}
+
+// Parse the DevToolsActivePort file Chrome writes into its --user-data-dir
+// once the debug server is listening (line 1: the port, line 2: the
+// browser-target path). Throws a tagged error (code
+// EDEVTOOLSACTIVEPORT_MALFORMED) on malformed content.
+function parseDevToolsActivePort(content) {
+  const lines = String(content).split(/\r?\n/);
+  const portText = (lines[0] || '').trim();
+  if (!/^\d+$/.test(portText)) {
+    const error = new Error('malformed DevToolsActivePort: first line is not a decimal port: '
+      + JSON.stringify(String(content).slice(0, 200)));
+    error.code = 'EDEVTOOLSACTIVEPORT_MALFORMED';
+    throw error;
+  }
+  const port = Number(portText);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    const error = new Error('malformed DevToolsActivePort: port out of range: '
+      + JSON.stringify(String(content).slice(0, 200)));
+    error.code = 'EDEVTOOLSACTIVEPORT_MALFORMED';
+    throw error;
+  }
+  return { port, browserPath: (lines[1] || '').trim() || null };
+}
+
+// Read + parse the file. Returns:
+//   null                                  — file not there yet (Chrome still starting)
+//   { port, browserPath, path }           — parsed
+//   { port: null, error, raw, path }      — present but malformed (kept out
+//                                           of the polling fast path; the
+//                                           next poll may see a complete file)
+function readDevToolsActivePort(filePath) {
+  let content;
+  try {
+    content = fs.readFileSync(filePath, 'utf8');
+  } catch (e) {
+    // ENOENT = not written yet; any other transient read error (e.g.
+    // Windows sharing violations while Chrome creates the file) is also
+    // treated as "not ready" — the next poll re-reads, and the timeout
+    // diagnostics re-check the file fresh.
+    return null;
+  }
+  try {
+    return { ...parseDevToolsActivePort(content), path: filePath };
+  } catch (e) {
+    return { port: null, error: e.message, raw: String(content).slice(0, 200), path: filePath };
+  }
+}
+
+// True when an error is the bind-race class (EADDRINUSE). The vite preview
+// reports it through the child's stderr text, in-process servers through
+// error.code — both shapes match here.
+function isPortInUseError(error) {
+  if (!error) return false;
+  if (error.code === 'EADDRINUSE') return true;
+  return /EADDRINUSE|address already in use/.test(String(error.message || error));
+}
+
+// Infrastructure retry for SERVICE ports (never a test re-run): start(port)
+// is called once with the initially allocated port and, when it fails with
+// EADDRINUSE, again on freshly allocated ports — at most maxRetries times
+// (default 3), logging "port X in use, retrying with Y" for every retry.
+// Callers must invoke this BEFORE any product check runs, so a retry can
+// never mask a gate verdict. start(port) must fully release a failed
+// attempt (a child that died binding must be reaped) and must reject with
+// an EADDRINUSE-class error for the retry to trigger — other failures are
+// rethrown untouched. Resolves { handle, port, portsTried }; on exhaustion
+// throws the last error annotated with every port that was tried.
+async function startServiceWithRetry(start, initialPort, options = {}) {
+  const maxRetries = options.maxRetries ?? 3;
+  const allocatePort = options.allocatePort || allocateFreePort;
+  const log = options.log || console.log;
+  const portInUse = options.isPortInUse || isPortInUseError;
+  const tried = [];
+  let port = initialPort;
+  for (;;) {
+    tried.push(port);
+    try {
+      const handle = await start(port);
+      return { handle, port, portsTried: tried };
+    } catch (error) {
+      if (!portInUse(error)) throw error;
+      if (tried.length > maxRetries) {
+        error.message = String(error.message || error)
+          + ' (EADDRINUSE retry exhausted; ports tried: ' + tried.join(', ') + ')';
+        throw error;
+      }
+      const next = await allocatePort();
+      log('port ' + port + ' in use, retrying with ' + next);
+      port = next;
+    }
+  }
+}
+
+// listenWithRetry: bind an in-process net/http server with the EADDRINUSE
+// retry above. serverFactory(port) must return a FRESH unlistened server
+// per call (handlers may close over the port argument). The transient
+// error listener is removed on success so later runtime errors keep their
+// normal (loud) semantics. Resolves { server, port, portsTried }.
+async function listenWithRetry(serverFactory, initialPort, options = {}) {
+  const bound = await startServiceWithRetry(async (port) => {
+    const server = serverFactory(port);
+    await new Promise((resolve, reject) => {
+      const onError = (error) => {
+        server.removeListener('error', onError);
+        reject(error);
+      };
+      server.once('error', onError);
+      server.listen(port, options.host || '127.0.0.1', () => {
+        server.removeListener('error', onError);
+        resolve(server);
+      });
+    });
+    return server;
+  }, initialPort, options);
+  return { server: bound.handle, port: bound.port, portsTried: bound.portsTried };
 }
 
 function resolveChromeExecutable(configured) {
@@ -175,9 +310,13 @@ function resolveChromeExecutable(configured) {
 async function launchChrome(url, options = {}) {
   const executable = resolveChromeExecutable(options.chromePath);
   const profileDir = options.profileDir || await fsp.mkdtemp(path.join(os.tmpdir(), 'locus-e2e-chrome-'));
-  let port;
   try {
-    port = await allocateFreePort();
+    // Suites reuse profile dirs on purpose (persistence reload, image
+    // restart cases) — a leftover DevToolsActivePort from the PREVIOUS
+    // chrome would point waitForCdp at the dead instance's port. Remove it
+    // so the only file waitForCdp can ever read is the one THIS chrome
+    // writes for the port it chose.
+    await fsp.rm(path.join(profileDir, 'DevToolsActivePort'), { force: true });
     const args = [
       '--headless=new',
       '--disable-gpu',
@@ -187,14 +326,18 @@ async function launchChrome(url, options = {}) {
       '--no-first-run',
       '--no-default-browser-check',
       '--remote-debugging-address=127.0.0.1',
-      '--remote-debugging-port=' + port,
+      // Port 0: Chrome picks its OWN free debug port and reports it by
+      // writing <profileDir>/DevToolsActivePort (waitForCdp reads it). The
+      // previous allocateFreePort()-then-bind dance had the same
+      // release/rebind race as every other preallocated port.
+      '--remote-debugging-port=0',
       '--user-data-dir=' + profileDir,
       ...(options.extraArgs || []),
       url,
     ];
     const handle = launchManagedProcess(executable, args, {
       label: options.label || 'Chrome',
-      port,
+      port: null,
       profileDir,
       cwd: options.cwd,
       env: options.env,
@@ -202,6 +345,10 @@ async function launchChrome(url, options = {}) {
     handle.url = url;
     handle.kind = 'chrome';
     handle.preserveProfile = !!options.preserveProfile;
+    handle.port = null; // resolved from DevToolsActivePort by waitForCdp
+    handle.devToolsActivePortPath = path.join(profileDir, 'DevToolsActivePort');
+    handle.devToolsActivePort = null; // { port, browserPath, appearedAfterMs } once parsed
+    handle.devToolsActivePortFirstSeenMs = null; // when the file first appeared
     return handle;
   } catch (error) {
     if (!options.profileDir) await removeProfile(profileDir);
@@ -245,6 +392,19 @@ async function collectDiagnostics(handle, options = {}) {
     if (version === undefined) version = await fetchJson(cdpUrl(handle, '/json/version'), fetchImpl, 250);
     if (targets === undefined) targets = await fetchJson(cdpUrl(handle, '/json/list'), fetchImpl, 250);
   }
+  // DevToolsActivePort at diagnostic time: the file-recorded observation
+  // (when Chrome first wrote it, what it parsed to) plus a FRESH read so a
+  // timeout report always answers "did the file ever appear?".
+  let devToolsActivePort = null;
+  if (handle?.kind === 'chrome' && handle.devToolsActivePortPath) {
+    devToolsActivePort = {
+      path: handle.devToolsActivePortPath,
+      resolvedPort: handle.port || null,
+      firstSeenAfterMs: handle.devToolsActivePortFirstSeenMs ?? null,
+      parsed: handle.devToolsActivePort || null,
+      now: readDevToolsActivePort(handle.devToolsActivePortPath),
+    };
+  }
   const status = processStatus(handle);
   return {
     phase: options.phase || 'readiness',
@@ -259,6 +419,7 @@ async function collectDiagnostics(handle, options = {}) {
     url: options.url || handle?.url || null,
     version,
     targets,
+    devToolsActivePort,
     stderrTail: handle?.stderrTail || '',
     stdoutTail: handle?.stdoutTail || '',
     lastValue: options.lastValue,
@@ -283,12 +444,27 @@ function formatDiagnostics(message, diagnostics) {
         ? targets.data.map(targetSummary).map((t) => JSON.stringify(t)).join('\n') || '(none)'
         : `HTTP ${targets.status} ${String(targets.body || '').slice(0, 1000)}`;
   if (targetText.length > 8000) targetText = targetText.slice(-8000);
+  let portFileText = null;
+  if (d.devToolsActivePort) {
+    const f = d.devToolsActivePort;
+    const nowText = f.now === null
+      ? 'absent at diagnostic time'
+      : f.now.port
+        ? 'present now (port ' + f.now.port + ')'
+        : 'present now but malformed: ' + f.now.error;
+    const seenText = f.firstSeenAfterMs === null
+      ? 'never appeared during the wait'
+      : 'first appeared after ' + f.firstSeenAfterMs + 'ms';
+    const parsedText = f.parsed ? ' resolved to port ' + f.parsed.port : '';
+    portFileText = 'DevToolsActivePort: ' + seenText + parsedText + '; ' + nowText;
+  }
   return [
     message,
     `phase=${d.phase || 'readiness'} elapsedMs=${d.elapsedMs ?? 'unknown'}`,
     `Chrome executable=${d.executable || 'unknown'}`,
     `PID=${d.pid ?? 'unknown'} alive=${d.alive === true ? 'yes' : 'no'} exitCode=${d.exitCode ?? 'null'} signal=${d.signal || 'none'}`,
     `debug port=${d.port ?? 'unknown'} url=${d.url || 'unknown'}`,
+    portFileText,
     `/json/version result: ${versionText}`,
     `/json/list snapshot:\n${targetText}`,
     `stderr tail:\n${d.stderrTail || '(empty)'}`,
@@ -303,16 +479,53 @@ async function readinessError(message, handle, options = {}) {
 }
 
 async function waitForCdp(handle, options = {}) {
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_CDP_TIMEOUT_MS;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const started = Date.now();
   let lastVersion;
   let lastTargets;
+  let lastPortFile;
+
+  // Phase 1 — Chrome cold start. With --remote-debugging-port=0 the debug
+  // port only becomes known when Chrome writes DevToolsActivePort into the
+  // profile dir. This phase shares the overall timeoutMs budget with the
+  // HTTP poll below; on a cold CI runner it is the phase that needed more
+  // than 15s (see the readiness-timeout evidence in the header comment).
+  while (handle.kind === 'chrome' && !handle.port) {
+    if (!isProcessAlive(handle)) {
+      throw await readinessError('CDP browser endpoint unavailable: Chrome exited before readiness', handle, {
+        phase: 'cdp', elapsedMs: Date.now() - started, lastVersion, lastTargets, lastPortFile,
+      });
+    }
+    lastPortFile = readDevToolsActivePort(handle.devToolsActivePortPath);
+    if (lastPortFile) {
+      // ??= (not === null): test doubles and future callers may build
+      // chrome handles without this field pre-initialized.
+      handle.devToolsActivePortFirstSeenMs ??= Date.now() - started;
+      if (lastPortFile.port) {
+        handle.port = lastPortFile.port;
+        handle.devToolsActivePort = {
+          port: lastPortFile.port,
+          browserPath: lastPortFile.browserPath,
+          appearedAfterMs: handle.devToolsActivePortFirstSeenMs,
+        };
+        break;
+      }
+    }
+    if (Date.now() - started >= timeoutMs) {
+      throw await readinessError('CDP browser endpoint unavailable: readiness timeout', handle, {
+        phase: 'cdp', elapsedMs: Date.now() - started, lastVersion, lastTargets, lastPortFile,
+      });
+    }
+    await sleep(Math.min(pollIntervalMs, Math.max(1, timeoutMs - (Date.now() - started))));
+  }
+
+  // Phase 2 — the debug endpoint answers HTTP.
   while (Date.now() - started < timeoutMs) {
     if (!isProcessAlive(handle)) {
       throw await readinessError('CDP browser endpoint unavailable: Chrome exited before readiness', handle, {
-        phase: 'cdp', elapsedMs: Date.now() - started, lastVersion, lastTargets,
+        phase: 'cdp', elapsedMs: Date.now() - started, lastVersion, lastTargets, lastPortFile,
       });
     }
     lastVersion = await fetchJson(cdpUrl(handle, '/json/version'), fetchImpl, Math.min(500, Math.max(50, pollIntervalMs * 2)));
@@ -322,13 +535,13 @@ async function waitForCdp(handle, options = {}) {
     }
     if (!isProcessAlive(handle)) {
       throw await readinessError('CDP browser endpoint unavailable: Chrome exited before readiness', handle, {
-        phase: 'cdp', elapsedMs: Date.now() - started, lastVersion, lastTargets,
+        phase: 'cdp', elapsedMs: Date.now() - started, lastVersion, lastTargets, lastPortFile,
       });
     }
     await sleep(Math.min(pollIntervalMs, Math.max(1, timeoutMs - (Date.now() - started))));
   }
   throw await readinessError('CDP browser endpoint unavailable: readiness timeout', handle, {
-    phase: 'cdp', elapsedMs: Date.now() - started, lastVersion, lastTargets,
+    phase: 'cdp', elapsedMs: Date.now() - started, lastVersion, lastTargets, lastPortFile,
   });
 }
 
@@ -516,10 +729,15 @@ module.exports = {
   collectDiagnostics,
   connectToTarget,
   formatDiagnostics,
+  isPortInUseError,
   isProcessAlive,
   launchChrome,
   launchManagedProcess,
+  listenWithRetry,
+  parseDevToolsActivePort,
   processStatus,
+  readDevToolsActivePort,
+  startServiceWithRetry,
   targetMatches,
   urlMatches,
   waitForCdp,

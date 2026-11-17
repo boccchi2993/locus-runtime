@@ -112,7 +112,7 @@ async function main() {
       chromePath: process.env.CHROME,
       label: 'active-content Chrome',
     });
-    await waitForCdp(chrome, { timeoutMs: 15000, fetchImpl: realFetch });
+    await waitForCdp(chrome, { fetchImpl: realFetch });
     const target = await waitForPageTarget(chrome, 'about:blank', {
       timeoutMs: 15000,
       fetchImpl: realFetch,

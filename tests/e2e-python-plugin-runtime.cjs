@@ -48,7 +48,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const {
-  allocateFreePort, closeChrome, connectToTarget, launchChrome, waitForCdp,
+  allocateFreePort, closeChrome, connectToTarget, launchChrome, listenWithRetry, waitForCdp,
   waitForPageTarget, waitForRuntimeCondition,
 } = require('./helpers/chrome.cjs');
 const { loadPythonManifest } = require('./helpers/python-manifest.cjs');
@@ -172,10 +172,11 @@ async function main() {
   const assetHits = [];
   const unauthorizedHits = [];
   const probeHits = [];
-  const port = await allocateFreePort();
-  const probePort = await allocateFreePort();
   const assetHitCount = () => assetHits.length;
-  server = http.createServer(async (req, res) => {
+  // allocateFreePort has a release/rebind race: both binds go through
+  // listenWithRetry (a FRESH server per attempt) so an EADDRINUSE retries
+  // on a freshly allocated port (at most 3 times) before any check runs.
+  const bound = await listenWithRetry(() => http.createServer(async (req, res) => {
     const u = new URL(req.url, 'http://127.0.0.1');
     if (u.pathname === '/tpr-page') {
       res.setHeader('content-type', 'text/html; charset=utf-8');
@@ -223,14 +224,16 @@ async function main() {
     unauthorizedHits.push({ path: u.pathname, t: Date.now() });
     res.statusCode = 404;
     res.end('not found');
-  });
-  await new Promise((r) => server.listen(port, '127.0.0.1', r));
-  probeServer = http.createServer((req, res) => {
+  }), await allocateFreePort());
+  server = bound.server;
+  const port = bound.port;
+  const probeBound = await listenWithRetry(() => http.createServer((req, res) => {
     probeHits.push({ path: req.url, t: Date.now() });
     res.setHeader('content-type', 'text/plain');
     res.end('probe-hit');
-  });
-  await new Promise((r) => probeServer.listen(probePort, '127.0.0.1', r));
+  }), await allocateFreePort());
+  probeServer = probeBound.server;
+  const probePort = probeBound.port;
   const ASSETS = 'http://127.0.0.1:' + port + '/assets';
   const SHELL_URL = 'http://127.0.0.1:' + port + '/src/shell.js';
 
@@ -258,7 +261,7 @@ async function main() {
       profileDir,
       extraArgs: ['--window-size=1280,800'],
     });
-    await waitForCdp(chrome, { timeoutMs: 15000 });
+    await waitForCdp(chrome);
     const target = await waitForPageTarget(chrome, pageUrl, { timeoutMs: 15000 });
     cdp = await connectToTarget(target);
     await waitForRuntimeCondition(cdp, '!!(window.__tpr && window.__tpr.ready && window.__pyrt)',
