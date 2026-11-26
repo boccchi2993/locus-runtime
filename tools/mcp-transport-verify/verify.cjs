@@ -1010,13 +1010,23 @@ async function main() {
 
   const out = config.out || path.join(os.tmpdir(), 'locus-mcp-transport-report-' + Date.now() + '.json');
   const json = JSON.stringify(report, null, 2);
-  if (out === '-') console.log(json);
-  else {
-    fs.writeFileSync(out, json);
-    console.log('\nreport written to ' + out);
+  let writeError = null;
+  if (out === '-') {
+    console.log(json);
+  } else {
+    try {
+      fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
+      fs.writeFileSync(out, json);
+      console.log('\nreport written to ' + out);
+    } catch (e) {
+      // the measurement is done: losing the artifact must not lose the evidence
+      writeError = String((e && e.message) || e);
+      console.error('\nreport could not be written to ' + out + ': ' + writeError + ' — printed below instead');
+      console.log(json);
+    }
   }
 
-  if (failures.length) return 2;
+  if (failures.length || writeError) return 2;
   return env.direct.ok && env.relay.ok ? 0 : 3;
 }
 
