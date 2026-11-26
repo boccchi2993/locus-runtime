@@ -11,5 +11,6 @@ const workspace = require('../../src/workspace.js');
 const vfs = require('../../src/vfs.js');
 const network = require('../../src/network.js');
 const shell = require('../../src/shell.js');
+const mcp = require('../../src/mcp.js');
 
-module.exports = Object.assign({}, workspace, vfs, network, shell);
+module.exports = Object.assign({}, workspace, vfs, network, shell, mcp);
