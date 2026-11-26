@@ -1,0 +1,16 @@
+<!doctype html>
+<!-- Browser half of the MCP transport verification harness. Served by
+     tools/mcp-transport-verify/verify.cjs from the runtime repository root
+     (so the relative import below resolves to the REAL src/network.js).
+     Not a gate input: vite does not build this page. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Locus MCP transport verification harness</title>
+</head>
+<body>
+  <h1>Locus MCP transport verification harness</h1>
+  <p>Driven over CDP by <code>tools/mcp-transport-verify/verify.cjs</code>.</p>
+  <script type="module" src="./harness.js"></script>
+</body>
+</html>

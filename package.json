@@ -19,7 +19,8 @@
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "test": "node tests/run-unit.cjs",
-    "test:e2e": "node tests/e2e.cjs"
+    "test:e2e": "node tests/e2e.cjs",
+    "verify:mcp-transport": "node tools/mcp-transport-verify/verify.cjs --control"
   },
   "devDependencies": {
     "vite": "^6.0.7"
