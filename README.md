@@ -236,6 +236,12 @@ The Python gates download the REAL pinned Pyodide set from the jsDelivr CDN
 plugin-runtime suites, which serve synthetic verified bytes locally.
 No model, model key or paid API is ever contacted.
 
+`npm run verify:mcp-transport` is a measurement, not a gate: it drives a
+real Chrome against a local MCP Streamable HTTP stand-in through the direct
+backend and the relay (`functions/fetch.js` of a sibling locus-product
+checkout) and reports JSON and SSE results per backend — see
+[tools/mcp-transport-verify/](tools/mcp-transport-verify/README.md).
+
 Layout: `src/index.js` (public entry) · `src/workspace-api.js` (provider
 subpath entry) · `src/{workspace,vfs,network,shell}.js` (implementation
 modules) · `src/worker-assets.js` (shipped worker sources) · `docs/`
