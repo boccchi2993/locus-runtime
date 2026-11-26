@@ -1,0 +1,1902 @@
+{
+  "schema": 1,
+  "generatedAt": "2026-11-26T07:11:54.498Z",
+  "environment": {
+    "node": "v24.10.0",
+    "platform": "win32 10.0.26200",
+    "chrome": {
+      "browser": "Chrome/157.0.8103.79",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/157.0.0.0 Safari/537.36"
+    },
+    "pageOrigin": "http://127.0.0.1:7789",
+    "upstreamOrigin": "http://mcp.test.local:7788",
+    "unavailable": null,
+    "runtimeRepo": {
+      "head": "b529179c1642d80c985088aa948d318badb16503",
+      "modified": []
+    },
+    "networkJsSha256": "2f05ecdd6bc85fd86acc4df2334517cf464d83c759c0dc0ece868baaa4676d94",
+    "productRepo": {
+      "head": "e5a2942c030511a7c0906b3da0c7befd3f31953f",
+      "modified": [],
+      "relaySha256": "7b9e64d24da8b30496c6229b161d48c2027ce6d9a490e9a1f3ca51aafbbb5f6a"
+    },
+    "standIn": {
+      "protocolVersion": "2025-06-18",
+      "eventDelayMs": 300,
+      "holdMs": 5000,
+      "longHoldMs": 35000
+    },
+    "thresholds": {
+      "STREAM_MARGIN_MS": 100,
+      "CANCEL_SETTLE_MAX_MS": 1000,
+      "CANCEL_REACH_MAX_MS": 2000,
+      "CANCEL_AT_MS": 1000,
+      "SHORT_DEADLINE_MS": 1000,
+      "RELAY_UPSTREAM_TIMEOUT_MS": 30000
+    },
+    "sanity": {
+      "direct": {
+        "ok": true,
+        "status": 200
+      },
+      "relay": {
+        "ok": true,
+        "status": 200,
+        "relayError": null
+      }
+    }
+  },
+  "probes": [
+    {
+      "id": "D-J1",
+      "combo": "direct-json",
+      "client": "fetch",
+      "mode": "json",
+      "url": "http://mcp.test.local:7788/mcp/json",
+      "rpcId": 1001,
+      "holdMs": null,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677115270,
+        "headersMs": 4,
+        "responseMs": 4,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 4,
+        "status": 200,
+        "contentType": "application/json",
+        "sessionId": "sess-1-64efd8a1",
+        "relayErrorHeader": null,
+        "bytes": 117,
+        "postCancelRead": null,
+        "bodyPreview": "{\"jsonrpc\":\"2.0\",\"id\":1001,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=json probe=D-J1\"}],\"isError\":false}}",
+        "error": null,
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677115273,
+        "eventMs": null,
+        "closeMs": 4,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": null,
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": true,
+        "status": 200,
+        "sessionIdReadable": true,
+        "upstreamSawBearer": true,
+        "closedBy": "server"
+      }
+    },
+    {
+      "id": "D-J2",
+      "combo": "direct-json",
+      "client": "fetch",
+      "mode": "json",
+      "url": "http://mcp.test.local:7788/mcp/json?expose=0",
+      "rpcId": 1002,
+      "holdMs": null,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677115271,
+        "headersMs": 6,
+        "responseMs": 6,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 6,
+        "status": 200,
+        "contentType": "application/json",
+        "sessionId": null,
+        "relayErrorHeader": null,
+        "bytes": 117,
+        "postCancelRead": null,
+        "bodyPreview": "{\"jsonrpc\":\"2.0\",\"id\":1002,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=json probe=D-J2\"}],\"isError\":false}}",
+        "error": null,
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677115276,
+        "eventMs": null,
+        "closeMs": 5,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": false
+      },
+      "relayBridge": null,
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": true,
+        "status": 200,
+        "sessionIdReadable": false,
+        "upstreamSawBearer": true,
+        "closedBy": "server"
+      }
+    },
+    {
+      "id": "D-J3",
+      "combo": "direct-json",
+      "client": "nr-direct",
+      "mode": "json",
+      "url": "http://mcp.test.local:7788/mcp/json",
+      "rpcId": 1003,
+      "holdMs": null,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677115271,
+        "headersMs": null,
+        "responseMs": 5,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 5,
+        "status": 200,
+        "contentType": "application/json",
+        "sessionId": "sess-3-1869bf59",
+        "relayErrorHeader": null,
+        "backend": "browser-direct",
+        "bytes": 117,
+        "postCancelRead": null,
+        "bodyPreview": "{\"jsonrpc\":\"2.0\",\"id\":1003,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=json probe=D-J3\"}],\"isError\":false}}",
+        "error": null,
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677115275,
+        "eventMs": null,
+        "closeMs": 4,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": null,
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": true,
+        "status": 200,
+        "sessionIdReadable": true,
+        "upstreamSawBearer": true,
+        "closedBy": "server"
+      }
+    },
+    {
+      "id": "D-J4",
+      "combo": "direct-json",
+      "client": "nr-request",
+      "mode": "json",
+      "url": "http://127.0.0.1:7789/mcp/json",
+      "rpcId": 1004,
+      "holdMs": null,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677115272,
+        "headersMs": null,
+        "responseMs": 5,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 5,
+        "status": 200,
+        "contentType": "application/json",
+        "sessionId": "sess-2-f0ac0ca7",
+        "relayErrorHeader": null,
+        "backend": "browser-direct",
+        "bytes": 117,
+        "postCancelRead": null,
+        "bodyPreview": "{\"jsonrpc\":\"2.0\",\"id\":1004,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=json probe=D-J4\"}],\"isError\":false}}",
+        "error": null,
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677115274,
+        "eventMs": null,
+        "closeMs": 3,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": null,
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": true,
+        "status": 200,
+        "sessionIdReadable": true,
+        "upstreamSawBearer": true,
+        "closedBy": "server"
+      }
+    },
+    {
+      "id": "D-S1",
+      "combo": "direct-sse",
+      "client": "fetch",
+      "mode": "sse",
+      "url": "http://mcp.test.local:7788/mcp/sse",
+      "rpcId": 1005,
+      "holdMs": 5000,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677115429,
+        "headersMs": 2,
+        "responseMs": 306,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 5303,
+        "status": 200,
+        "contentType": "text/event-stream; charset=utf-8",
+        "sessionId": "sess-5-3b48adb1",
+        "relayErrorHeader": null,
+        "bytes": 139,
+        "postCancelRead": null,
+        "bodyPreview": "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1005,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=sse probe=D-S1\"}],\"isError\":false}}\n\n",
+        "error": null,
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677115430,
+        "eventMs": 306,
+        "closeMs": 5303,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": null,
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": true,
+        "status": 200,
+        "sessionIdReadable": true,
+        "upstreamSawBearer": true,
+        "closedBy": "server",
+        "responseBeforeUpstreamClose": true
+      }
+    },
+    {
+      "id": "D-S2",
+      "combo": "direct-sse",
+      "client": "fetch",
+      "mode": "sse",
+      "url": "http://mcp.test.local:7788/mcp/sse",
+      "rpcId": 1006,
+      "holdMs": 5000,
+      "cancel": {
+        "type": "after-response"
+      },
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677120887,
+        "headersMs": 3,
+        "responseMs": 310,
+        "cancelMs": 310,
+        "readSettledMs": 311,
+        "endMs": 311,
+        "status": 200,
+        "contentType": "text/event-stream; charset=utf-8",
+        "sessionId": "sess-6-820b00e2",
+        "relayErrorHeader": null,
+        "bytes": 139,
+        "postCancelRead": "rejected:AbortError",
+        "bodyPreview": "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1006,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=sse probe=D-S2\"}],\"isError\":false}}\n\n",
+        "error": {
+          "name": "AbortError",
+          "message": "signal is aborted without reason",
+          "networkCode": null,
+          "timeout": false,
+          "cancelled": false,
+          "ambiguous": false
+        },
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677120889,
+        "eventMs": 309,
+        "closeMs": 311,
+        "closedBy": "client",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": null,
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": true,
+        "status": 200,
+        "sessionIdReadable": true,
+        "upstreamSawBearer": true,
+        "closedBy": "client",
+        "responseBeforeUpstreamClose": false,
+        "cancelToSettledMs": 0,
+        "cancelReachedUpstream": true
+      }
+    },
+    {
+      "id": "D-S3",
+      "combo": "direct-sse",
+      "client": "nr-direct",
+      "mode": "sse",
+      "url": "http://mcp.test.local:7788/mcp/sse",
+      "rpcId": 1007,
+      "holdMs": 5000,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677121352,
+        "headersMs": null,
+        "responseMs": 5306,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 5306,
+        "status": 200,
+        "contentType": "text/event-stream; charset=utf-8",
+        "sessionId": "sess-7-4c44177d",
+        "relayErrorHeader": null,
+        "backend": "browser-direct",
+        "bytes": 139,
+        "postCancelRead": null,
+        "bodyPreview": "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1007,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=sse probe=D-S3\"}],\"isError\":false}}\n\n",
+        "error": null,
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677121353,
+        "eventMs": 310,
+        "closeMs": 5305,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": null,
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": true,
+        "status": 200,
+        "sessionIdReadable": true,
+        "upstreamSawBearer": true,
+        "closedBy": "server",
+        "responseBeforeUpstreamClose": false
+      }
+    },
+    {
+      "id": "D-S4",
+      "combo": "direct-sse",
+      "client": "nr-direct",
+      "mode": "sse",
+      "url": "http://mcp.test.local:7788/mcp/sse",
+      "rpcId": 1008,
+      "holdMs": 5000,
+      "cancel": {
+        "type": "at",
+        "ms": 1000
+      },
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677126826,
+        "headersMs": null,
+        "responseMs": null,
+        "cancelMs": 1009,
+        "readSettledMs": 1009,
+        "endMs": 1009,
+        "relayErrorHeader": null,
+        "postCancelRead": null,
+        "bodyPreview": null,
+        "error": {
+          "name": "AbortError",
+          "message": "network request cancelled",
+          "networkCode": "network_aborted",
+          "timeout": false,
+          "cancelled": true,
+          "ambiguous": false
+        },
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677126826,
+        "eventMs": 304,
+        "closeMs": 1009,
+        "closedBy": "client",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": null,
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": false,
+        "sessionIdReadable": null,
+        "upstreamSawBearer": true,
+        "closedBy": "client",
+        "responseBeforeUpstreamClose": false,
+        "cancelToSettledMs": 0,
+        "cancelReachedUpstream": true
+      }
+    },
+    {
+      "id": "D-S5",
+      "combo": "direct-sse",
+      "client": "nr-direct",
+      "mode": "sse",
+      "url": "http://mcp.test.local:7788/mcp/sse",
+      "rpcId": 1009,
+      "holdMs": 5000,
+      "cancel": null,
+      "timeoutMs": 1000,
+      "browser": {
+        "wallStart": 1795677127987,
+        "headersMs": null,
+        "responseMs": null,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 1008,
+        "relayErrorHeader": null,
+        "postCancelRead": null,
+        "bodyPreview": null,
+        "error": {
+          "name": "NetworkTimeoutError",
+          "message": "network request timed out after 1000ms",
+          "networkCode": "network_timeout",
+          "timeout": true,
+          "cancelled": false,
+          "ambiguous": false
+        },
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677127989,
+        "eventMs": 308,
+        "closeMs": 1009,
+        "closedBy": "client",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": null,
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": false,
+        "sessionIdReadable": null,
+        "upstreamSawBearer": true,
+        "closedBy": "client",
+        "responseBeforeUpstreamClose": false
+      }
+    },
+    {
+      "id": "D-S6",
+      "combo": "direct-sse",
+      "client": "nr-request",
+      "mode": "sse",
+      "url": "http://127.0.0.1:7789/mcp/sse",
+      "rpcId": 1010,
+      "holdMs": 5000,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677129148,
+        "headersMs": null,
+        "responseMs": 5309,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 5309,
+        "status": 200,
+        "contentType": "text/event-stream; charset=utf-8",
+        "sessionId": "sess-10-2868c429",
+        "relayErrorHeader": null,
+        "backend": "browser-direct",
+        "bytes": 139,
+        "postCancelRead": null,
+        "bodyPreview": "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1010,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=sse probe=D-S6\"}],\"isError\":false}}\n\n",
+        "error": null,
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677129149,
+        "eventMs": 303,
+        "closeMs": 5308,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": null,
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": true,
+        "status": 200,
+        "sessionIdReadable": true,
+        "upstreamSawBearer": true,
+        "closedBy": "server",
+        "responseBeforeUpstreamClose": false
+      }
+    },
+    {
+      "id": "D-S7",
+      "combo": "direct-sse",
+      "client": "nr-request",
+      "mode": "sse",
+      "url": "http://127.0.0.1:7789/mcp/sse",
+      "rpcId": 1011,
+      "holdMs": 5000,
+      "cancel": null,
+      "timeoutMs": 1000,
+      "browser": {
+        "wallStart": 1795677134613,
+        "headersMs": null,
+        "responseMs": null,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 1008,
+        "relayErrorHeader": null,
+        "postCancelRead": null,
+        "bodyPreview": null,
+        "error": {
+          "name": "NetworkTimeoutError",
+          "message": "network request timed out after 1000ms (the request may or may not have reached the server; it was NOT retried)",
+          "networkCode": "network_timeout",
+          "timeout": true,
+          "cancelled": false,
+          "ambiguous": true
+        },
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677134613,
+        "eventMs": 309,
+        "closeMs": 1009,
+        "closedBy": "client",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": null,
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": false,
+        "sessionIdReadable": null,
+        "upstreamSawBearer": true,
+        "closedBy": "client",
+        "responseBeforeUpstreamClose": false
+      }
+    },
+    {
+      "id": "R-J1",
+      "combo": "relay-json",
+      "client": "fetch",
+      "mode": "json",
+      "url": "http://mcp.test.local:7788/mcp/json (via POST /fetch envelope)",
+      "rpcId": 1012,
+      "holdMs": null,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677135775,
+        "headersMs": 10,
+        "responseMs": 10,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 10,
+        "status": 200,
+        "contentType": "application/json",
+        "sessionId": "sess-12-aa12428a",
+        "relayErrorHeader": null,
+        "bytes": 117,
+        "postCancelRead": null,
+        "bodyPreview": "{\"jsonrpc\":\"2.0\",\"id\":1012,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=json probe=R-J1\"}],\"isError\":false}}",
+        "error": null,
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677135782,
+        "eventMs": null,
+        "closeMs": 7,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": {
+        "status": 200,
+        "handlerMs": 7,
+        "signalAbortedAtDone": false,
+        "browserCloseMs": 8,
+        "browserClosedBeforeDone": false,
+        "threw": null
+      },
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": true,
+        "status": 200,
+        "sessionIdReadable": true,
+        "upstreamSawBearer": true,
+        "closedBy": "server"
+      }
+    },
+    {
+      "id": "R-J2",
+      "combo": "relay-json",
+      "client": "nr-request",
+      "mode": "json",
+      "url": "http://mcp.test.local:7788/mcp/json",
+      "rpcId": 1013,
+      "holdMs": null,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677135775,
+        "headersMs": null,
+        "responseMs": 11,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 11,
+        "status": 200,
+        "contentType": "application/json",
+        "sessionId": "sess-13-9c819d89",
+        "relayErrorHeader": null,
+        "backend": "edge-relay",
+        "bytes": 117,
+        "postCancelRead": null,
+        "bodyPreview": "{\"jsonrpc\":\"2.0\",\"id\":1013,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=json probe=R-J2\"}],\"isError\":false}}",
+        "error": null,
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677135784,
+        "eventMs": null,
+        "closeMs": 9,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": {
+        "status": 200,
+        "handlerMs": 4,
+        "signalAbortedAtDone": false,
+        "browserCloseMs": 4,
+        "browserClosedBeforeDone": false,
+        "threw": null
+      },
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": true,
+        "status": 200,
+        "sessionIdReadable": true,
+        "upstreamSawBearer": true,
+        "closedBy": "server"
+      }
+    },
+    {
+      "id": "R-S1",
+      "combo": "relay-sse",
+      "client": "fetch",
+      "mode": "sse",
+      "url": "http://mcp.test.local:7788/mcp/sse (via POST /fetch envelope)",
+      "rpcId": 1014,
+      "holdMs": 5000,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677135945,
+        "headersMs": 5309,
+        "responseMs": 5309,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 5309,
+        "status": 200,
+        "contentType": "text/event-stream; charset=utf-8",
+        "sessionId": "sess-14-9df0b7ac",
+        "relayErrorHeader": null,
+        "bytes": 139,
+        "postCancelRead": null,
+        "bodyPreview": "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1014,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=sse probe=R-S1\"}],\"isError\":false}}\n\n",
+        "error": null,
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677135947,
+        "eventMs": 307,
+        "closeMs": 5307,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": {
+        "status": 200,
+        "handlerMs": 5307,
+        "signalAbortedAtDone": false,
+        "browserCloseMs": 5307,
+        "browserClosedBeforeDone": false,
+        "threw": null
+      },
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": true,
+        "status": 200,
+        "sessionIdReadable": true,
+        "upstreamSawBearer": true,
+        "closedBy": "server",
+        "responseBeforeUpstreamClose": false
+      }
+    },
+    {
+      "id": "R-S2",
+      "combo": "relay-sse",
+      "client": "fetch",
+      "mode": "sse",
+      "url": "http://mcp.test.local:7788/mcp/sse (via POST /fetch envelope)",
+      "rpcId": 1015,
+      "holdMs": 5000,
+      "cancel": {
+        "type": "at",
+        "ms": 1000
+      },
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677141409,
+        "headersMs": null,
+        "responseMs": null,
+        "cancelMs": 1002,
+        "readSettledMs": 1002,
+        "endMs": 1002,
+        "relayErrorHeader": null,
+        "postCancelRead": null,
+        "bodyPreview": null,
+        "error": {
+          "name": "AbortError",
+          "message": "signal is aborted without reason",
+          "networkCode": null,
+          "timeout": false,
+          "cancelled": false,
+          "ambiguous": false
+        },
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677141412,
+        "eventMs": 308,
+        "closeMs": 5318,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": {
+        "status": 200,
+        "handlerMs": 5318,
+        "signalAbortedAtDone": true,
+        "browserCloseMs": 1002,
+        "browserClosedBeforeDone": true,
+        "threw": null
+      },
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": false,
+        "sessionIdReadable": null,
+        "upstreamSawBearer": true,
+        "closedBy": "server",
+        "responseBeforeUpstreamClose": false,
+        "cancelToSettledMs": 0,
+        "cancelReachedUpstream": false
+      }
+    },
+    {
+      "id": "R-S4",
+      "combo": "relay-sse",
+      "client": "nr-request",
+      "mode": "sse",
+      "url": "http://mcp.test.local:7788/mcp/sse",
+      "rpcId": 1016,
+      "holdMs": 5000,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677146898,
+        "headersMs": null,
+        "responseMs": 5322,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 5322,
+        "status": 200,
+        "contentType": "text/event-stream; charset=utf-8",
+        "sessionId": "sess-16-8a4390d5",
+        "relayErrorHeader": null,
+        "backend": "edge-relay",
+        "bytes": 139,
+        "postCancelRead": null,
+        "bodyPreview": "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1016,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=sse probe=R-S4\"}],\"isError\":false}}\n\n",
+        "error": null,
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677146901,
+        "eventMs": 307,
+        "closeMs": 5320,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": {
+        "status": 200,
+        "handlerMs": 5319,
+        "signalAbortedAtDone": false,
+        "browserCloseMs": 5320,
+        "browserClosedBeforeDone": false,
+        "threw": null
+      },
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": true,
+        "status": 200,
+        "sessionIdReadable": true,
+        "upstreamSawBearer": true,
+        "closedBy": "server",
+        "responseBeforeUpstreamClose": false
+      }
+    },
+    {
+      "id": "R-S5",
+      "combo": "relay-sse",
+      "client": "nr-request",
+      "mode": "sse",
+      "url": "http://mcp.test.local:7788/mcp/sse",
+      "rpcId": 1017,
+      "holdMs": 5000,
+      "cancel": {
+        "type": "at",
+        "ms": 1000
+      },
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677152374,
+        "headersMs": null,
+        "responseMs": null,
+        "cancelMs": 1009,
+        "readSettledMs": 1009,
+        "endMs": 1009,
+        "relayErrorHeader": null,
+        "postCancelRead": null,
+        "bodyPreview": null,
+        "error": {
+          "name": "AbortError",
+          "message": "network request cancelled",
+          "networkCode": "network_aborted",
+          "timeout": false,
+          "cancelled": true,
+          "ambiguous": false
+        },
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677152377,
+        "eventMs": 309,
+        "closeMs": 5306,
+        "closedBy": "server",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": {
+        "status": 200,
+        "handlerMs": 5305,
+        "signalAbortedAtDone": true,
+        "browserCloseMs": 1008,
+        "browserClosedBeforeDone": true,
+        "threw": null
+      },
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": false,
+        "sessionIdReadable": null,
+        "upstreamSawBearer": true,
+        "closedBy": "server",
+        "responseBeforeUpstreamClose": false,
+        "cancelToSettledMs": 0,
+        "cancelReachedUpstream": false
+      }
+    },
+    {
+      "id": "R-S3",
+      "combo": "relay-sse",
+      "client": "fetch",
+      "mode": "sse",
+      "url": "http://mcp.test.local:7788/mcp/sse (via POST /fetch envelope)",
+      "rpcId": 1018,
+      "holdMs": 35000,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677157868,
+        "headersMs": 30007,
+        "responseMs": null,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 30008,
+        "status": 504,
+        "contentType": "application/json",
+        "sessionId": null,
+        "relayErrorHeader": "1",
+        "bytes": 81,
+        "postCancelRead": null,
+        "bodyPreview": "{\"error\":{\"code\":\"network_timeout\",\"message\":\"Upstream timed out after 30000ms\"}}",
+        "error": null,
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677157871,
+        "eventMs": 307,
+        "closeMs": 30002,
+        "closedBy": "client",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": {
+        "status": 504,
+        "handlerMs": 29998,
+        "signalAbortedAtDone": false,
+        "browserCloseMs": 29999,
+        "browserClosedBeforeDone": false,
+        "threw": null
+      },
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": false,
+        "status": 504,
+        "sessionIdReadable": false,
+        "upstreamSawBearer": true,
+        "closedBy": "client",
+        "responseBeforeUpstreamClose": false
+      }
+    },
+    {
+      "id": "R-S6",
+      "combo": "relay-sse",
+      "client": "nr-request",
+      "mode": "sse",
+      "url": "http://mcp.test.local:7788/mcp/sse",
+      "rpcId": 1019,
+      "holdMs": 35000,
+      "cancel": null,
+      "timeoutMs": null,
+      "browser": {
+        "wallStart": 1795677157868,
+        "headersMs": null,
+        "responseMs": null,
+        "cancelMs": null,
+        "readSettledMs": null,
+        "endMs": 30008,
+        "relayErrorHeader": null,
+        "postCancelRead": null,
+        "bodyPreview": null,
+        "error": {
+          "name": "Error",
+          "message": "network request failed: Upstream timed out after 30000ms (the request may or may not have reached the server; it was NOT retried)",
+          "networkCode": "network_timeout",
+          "timeout": false,
+          "cancelled": false,
+          "ambiguous": true
+        },
+        "harnessError": null
+      },
+      "upstream": {
+        "wallReq": 1795677157874,
+        "eventMs": 308,
+        "closeMs": 30002,
+        "closedBy": "client",
+        "auth": "ok",
+        "status": 200,
+        "sentSessionId": true,
+        "accept": "application/json, text/event-stream",
+        "protocolVersion": "2025-06-18",
+        "exposeSessionId": true
+      },
+      "relayBridge": {
+        "status": 504,
+        "handlerMs": 29998,
+        "signalAbortedAtDone": false,
+        "browserCloseMs": 29998,
+        "browserClosedBeforeDone": false,
+        "threw": null
+      },
+      "facts": {
+        "measured": true,
+        "responseMatchesRequestId": false,
+        "sessionIdReadable": null,
+        "upstreamSawBearer": true,
+        "closedBy": "client",
+        "responseBeforeUpstreamClose": false
+      }
+    }
+  ],
+  "verdicts": {
+    "direct-json": {
+      "platform": {
+        "verdict": "supported",
+        "criteria": [
+          {
+            "id": "direct-json: J1: the JSON-RPC response for the request id reached the client",
+            "ok": true
+          },
+          {
+            "id": "direct-json: J1: MCP-Session-Id is readable by the client",
+            "ok": true
+          }
+        ]
+      },
+      "runtime": {
+        "verdict": "supported",
+        "criteria": [
+          {
+            "id": "direct-json: J3: the JSON-RPC response for the request id reached the client",
+            "ok": true
+          },
+          {
+            "id": "direct-json: J3: MCP-Session-Id is readable by the client",
+            "ok": true
+          },
+          {
+            "id": "direct-json: J4: the JSON-RPC response for the request id reached the client",
+            "ok": true
+          },
+          {
+            "id": "direct-json: J4: MCP-Session-Id is readable by the client",
+            "ok": true
+          }
+        ]
+      }
+    },
+    "direct-sse": {
+      "platform": {
+        "verdict": "supported",
+        "criteria": [
+          {
+            "id": "direct-sse: S1: the JSON-RPC response for the request id reached the client",
+            "ok": true
+          },
+          {
+            "id": "direct-sse: S1: the response arrives BEFORE the upstream closes (streaming)",
+            "ok": true
+          },
+          {
+            "id": "direct-sse: S1: MCP-Session-Id is readable by the client",
+            "ok": true
+          },
+          {
+            "id": "direct-sse: S2: the outstanding read settles after cancel",
+            "ok": true
+          },
+          {
+            "id": "direct-sse: S2: the cancel closes the upstream connection",
+            "ok": true
+          }
+        ]
+      },
+      "runtime": {
+        "verdict": "not_supported",
+        "failed": [
+          "direct-sse: S3: the response arrives BEFORE the upstream closes (streaming)",
+          "direct-sse: S5: the JSON-RPC response for the request id reached the client",
+          "direct-sse: S7: the JSON-RPC response for the request id reached the client"
+        ],
+        "notMeasured": [],
+        "criteria": [
+          {
+            "id": "direct-sse: S3: the JSON-RPC response for the request id reached the client",
+            "ok": true
+          },
+          {
+            "id": "direct-sse: S3: the response arrives BEFORE the upstream closes (streaming)",
+            "ok": false
+          },
+          {
+            "id": "direct-sse: S4: the outstanding read settles after cancel",
+            "ok": true
+          },
+          {
+            "id": "direct-sse: S4: the cancel closes the upstream connection",
+            "ok": true
+          },
+          {
+            "id": "direct-sse: S5: the JSON-RPC response for the request id reached the client",
+            "ok": false
+          },
+          {
+            "id": "direct-sse: S6: the JSON-RPC response for the request id reached the client",
+            "ok": true
+          },
+          {
+            "id": "direct-sse: S7: the JSON-RPC response for the request id reached the client",
+            "ok": false
+          }
+        ]
+      }
+    },
+    "relay-json": {
+      "platform": {
+        "verdict": "supported",
+        "criteria": [
+          {
+            "id": "relay-json: J1: the JSON-RPC response for the request id reached the client",
+            "ok": true
+          },
+          {
+            "id": "relay-json: J1: the upstream received the bearer",
+            "ok": true
+          },
+          {
+            "id": "relay-json: J1: MCP-Session-Id is readable by the client",
+            "ok": true
+          }
+        ]
+      },
+      "runtime": {
+        "verdict": "supported",
+        "criteria": [
+          {
+            "id": "relay-json: J2: the JSON-RPC response for the request id reached the client",
+            "ok": true
+          },
+          {
+            "id": "relay-json: J2: the upstream received the bearer",
+            "ok": true
+          },
+          {
+            "id": "relay-json: J2: MCP-Session-Id is readable by the client",
+            "ok": true
+          }
+        ]
+      }
+    },
+    "relay-sse": {
+      "platform": {
+        "verdict": "not_supported",
+        "failed": [
+          "relay-sse: S1: the response arrives BEFORE the upstream closes (streaming)",
+          "relay-sse: S2: the cancel closes the upstream connection",
+          "relay-sse: S3: the JSON-RPC response for the request id reached the client"
+        ],
+        "notMeasured": [],
+        "criteria": [
+          {
+            "id": "relay-sse: S1: the JSON-RPC response for the request id reached the client",
+            "ok": true
+          },
+          {
+            "id": "relay-sse: S1: the response arrives BEFORE the upstream closes (streaming)",
+            "ok": false
+          },
+          {
+            "id": "relay-sse: S1: MCP-Session-Id is readable by the client",
+            "ok": true
+          },
+          {
+            "id": "relay-sse: S2: the outstanding read settles after cancel",
+            "ok": true
+          },
+          {
+            "id": "relay-sse: S2: the cancel closes the upstream connection",
+            "ok": false
+          },
+          {
+            "id": "relay-sse: S3: the JSON-RPC response for the request id reached the client",
+            "ok": false
+          }
+        ]
+      },
+      "runtime": {
+        "verdict": "not_supported",
+        "failed": [
+          "relay-sse: S4: the response arrives BEFORE the upstream closes (streaming)",
+          "relay-sse: S5: the cancel closes the upstream connection",
+          "relay-sse: S6: the JSON-RPC response for the request id reached the client"
+        ],
+        "notMeasured": [],
+        "criteria": [
+          {
+            "id": "relay-sse: S4: the JSON-RPC response for the request id reached the client",
+            "ok": true
+          },
+          {
+            "id": "relay-sse: S4: the response arrives BEFORE the upstream closes (streaming)",
+            "ok": false
+          },
+          {
+            "id": "relay-sse: S5: the outstanding read settles after cancel",
+            "ok": true
+          },
+          {
+            "id": "relay-sse: S5: the cancel closes the upstream connection",
+            "ok": false
+          },
+          {
+            "id": "relay-sse: S6: the JSON-RPC response for the request id reached the client",
+            "ok": false
+          }
+        ]
+      }
+    }
+  },
+  "control": {
+    "relay": {
+      "label": "control-relay.mjs",
+      "sha256": "63f4d9f776bc7323dda6d608a162fe6709db182ba36dc45a915ac760a2b2ab8e"
+    },
+    "sanity": {
+      "ok": true,
+      "status": 200,
+      "relayError": null
+    },
+    "probes": [
+      {
+        "id": "C-J1",
+        "combo": "relay-json",
+        "client": "fetch",
+        "mode": "json",
+        "url": "http://mcp.test.local:7788/mcp/json (via POST /fetch envelope)",
+        "rpcId": 2012,
+        "holdMs": null,
+        "cancel": null,
+        "timeoutMs": null,
+        "browser": {
+          "wallStart": 1795677188046,
+          "headersMs": 6,
+          "responseMs": 6,
+          "cancelMs": null,
+          "readSettledMs": null,
+          "endMs": 6,
+          "status": 200,
+          "contentType": "application/json",
+          "sessionId": "sess-20-5fa96f50",
+          "relayErrorHeader": null,
+          "bytes": 117,
+          "postCancelRead": null,
+          "bodyPreview": "{\"jsonrpc\":\"2.0\",\"id\":2012,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=json probe=C-J1\"}],\"isError\":false}}",
+          "error": null,
+          "harnessError": null
+        },
+        "upstream": {
+          "wallReq": 1795677188049,
+          "eventMs": null,
+          "closeMs": 3,
+          "closedBy": "server",
+          "auth": "ok",
+          "status": 200,
+          "sentSessionId": true,
+          "accept": "application/json, text/event-stream",
+          "protocolVersion": "2025-06-18",
+          "exposeSessionId": true
+        },
+        "relayBridge": {
+          "status": 200,
+          "handlerMs": 4,
+          "signalAbortedAtDone": false,
+          "browserCloseMs": 4,
+          "browserClosedBeforeDone": false,
+          "threw": null
+        },
+        "facts": {
+          "measured": true,
+          "responseMatchesRequestId": true,
+          "status": 200,
+          "sessionIdReadable": true,
+          "upstreamSawBearer": true,
+          "closedBy": "server"
+        }
+      },
+      {
+        "id": "C-J2",
+        "combo": "relay-json",
+        "client": "nr-request",
+        "mode": "json",
+        "url": "http://mcp.test.local:7788/mcp/json",
+        "rpcId": 2013,
+        "holdMs": null,
+        "cancel": null,
+        "timeoutMs": null,
+        "browser": {
+          "wallStart": 1795677188047,
+          "headersMs": null,
+          "responseMs": 6,
+          "cancelMs": null,
+          "readSettledMs": null,
+          "endMs": 6,
+          "status": 200,
+          "contentType": "application/json",
+          "sessionId": "sess-21-4711fd50",
+          "relayErrorHeader": null,
+          "backend": "edge-relay",
+          "bytes": 117,
+          "postCancelRead": null,
+          "bodyPreview": "{\"jsonrpc\":\"2.0\",\"id\":2013,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=json probe=C-J2\"}],\"isError\":false}}",
+          "error": null,
+          "harnessError": null
+        },
+        "upstream": {
+          "wallReq": 1795677188051,
+          "eventMs": null,
+          "closeMs": 4,
+          "closedBy": "server",
+          "auth": "ok",
+          "status": 200,
+          "sentSessionId": true,
+          "accept": "application/json, text/event-stream",
+          "protocolVersion": "2025-06-18",
+          "exposeSessionId": true
+        },
+        "relayBridge": {
+          "status": 200,
+          "handlerMs": 4,
+          "signalAbortedAtDone": false,
+          "browserCloseMs": 4,
+          "browserClosedBeforeDone": false,
+          "threw": null
+        },
+        "facts": {
+          "measured": true,
+          "responseMatchesRequestId": true,
+          "status": 200,
+          "sessionIdReadable": true,
+          "upstreamSawBearer": true,
+          "closedBy": "server"
+        }
+      },
+      {
+        "id": "C-S1",
+        "combo": "relay-sse",
+        "client": "fetch",
+        "mode": "sse",
+        "url": "http://mcp.test.local:7788/mcp/sse (via POST /fetch envelope)",
+        "rpcId": 2014,
+        "holdMs": 5000,
+        "cancel": null,
+        "timeoutMs": null,
+        "browser": {
+          "wallStart": 1795677188206,
+          "headersMs": 4,
+          "responseMs": 308,
+          "cancelMs": null,
+          "readSettledMs": null,
+          "endMs": 5313,
+          "status": 200,
+          "contentType": "text/event-stream; charset=utf-8",
+          "sessionId": "sess-22-61fecb21",
+          "relayErrorHeader": null,
+          "bytes": 139,
+          "postCancelRead": null,
+          "bodyPreview": "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2014,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=sse probe=C-S1\"}],\"isError\":false}}\n\n",
+          "error": null,
+          "harnessError": null
+        },
+        "upstream": {
+          "wallReq": 1795677188207,
+          "eventMs": 307,
+          "closeMs": 5311,
+          "closedBy": "server",
+          "auth": "ok",
+          "status": 200,
+          "sentSessionId": true,
+          "accept": "application/json, text/event-stream",
+          "protocolVersion": "2025-06-18",
+          "exposeSessionId": true
+        },
+        "relayBridge": {
+          "status": 200,
+          "handlerMs": 2,
+          "signalAbortedAtDone": false,
+          "browserCloseMs": 5311,
+          "browserClosedBeforeDone": false,
+          "threw": null
+        },
+        "facts": {
+          "measured": true,
+          "responseMatchesRequestId": true,
+          "status": 200,
+          "sessionIdReadable": true,
+          "upstreamSawBearer": true,
+          "closedBy": "server",
+          "responseBeforeUpstreamClose": true
+        }
+      },
+      {
+        "id": "C-S2",
+        "combo": "relay-sse",
+        "client": "fetch",
+        "mode": "sse",
+        "url": "http://mcp.test.local:7788/mcp/sse (via POST /fetch envelope)",
+        "rpcId": 2015,
+        "holdMs": 5000,
+        "cancel": {
+          "type": "at",
+          "ms": 1000
+        },
+        "timeoutMs": null,
+        "browser": {
+          "wallStart": 1795677193674,
+          "headersMs": 4,
+          "responseMs": 309,
+          "cancelMs": 1001,
+          "readSettledMs": 1002,
+          "endMs": 1002,
+          "status": 200,
+          "contentType": "text/event-stream; charset=utf-8",
+          "sessionId": "sess-23-1041bc40",
+          "relayErrorHeader": null,
+          "bytes": 139,
+          "postCancelRead": null,
+          "bodyPreview": "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2015,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=sse probe=C-S2\"}],\"isError\":false}}\n\n",
+          "error": {
+            "name": "AbortError",
+            "message": "signal is aborted without reason",
+            "networkCode": null,
+            "timeout": false,
+            "cancelled": false,
+            "ambiguous": false
+          },
+          "harnessError": null
+        },
+        "upstream": {
+          "wallReq": 1795677193677,
+          "eventMs": 308,
+          "closeMs": 1004,
+          "closedBy": "client",
+          "auth": "ok",
+          "status": 200,
+          "sentSessionId": true,
+          "accept": "application/json, text/event-stream",
+          "protocolVersion": "2025-06-18",
+          "exposeSessionId": true
+        },
+        "relayBridge": {
+          "status": 200,
+          "handlerMs": 1,
+          "signalAbortedAtDone": false,
+          "browserCloseMs": 1000,
+          "browserClosedBeforeDone": false,
+          "threw": null
+        },
+        "facts": {
+          "measured": true,
+          "responseMatchesRequestId": true,
+          "status": 200,
+          "sessionIdReadable": true,
+          "upstreamSawBearer": true,
+          "closedBy": "client",
+          "responseBeforeUpstreamClose": true,
+          "cancelToSettledMs": 0,
+          "cancelReachedUpstream": true
+        }
+      },
+      {
+        "id": "C-S4",
+        "combo": "relay-sse",
+        "client": "nr-request",
+        "mode": "sse",
+        "url": "http://mcp.test.local:7788/mcp/sse",
+        "rpcId": 2016,
+        "holdMs": 5000,
+        "cancel": null,
+        "timeoutMs": null,
+        "browser": {
+          "wallStart": 1795677194830,
+          "headersMs": null,
+          "responseMs": 5319,
+          "cancelMs": null,
+          "readSettledMs": null,
+          "endMs": 5319,
+          "status": 200,
+          "contentType": "text/event-stream; charset=utf-8",
+          "sessionId": "sess-24-1f5eef11",
+          "relayErrorHeader": null,
+          "backend": "edge-relay",
+          "bytes": 139,
+          "postCancelRead": null,
+          "bodyPreview": "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2016,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=sse probe=C-S4\"}],\"isError\":false}}\n\n",
+          "error": null,
+          "harnessError": null
+        },
+        "upstream": {
+          "wallReq": 1795677194833,
+          "eventMs": 308,
+          "closeMs": 5318,
+          "closedBy": "server",
+          "auth": "ok",
+          "status": 200,
+          "sentSessionId": true,
+          "accept": "application/json, text/event-stream",
+          "protocolVersion": "2025-06-18",
+          "exposeSessionId": true
+        },
+        "relayBridge": {
+          "status": 200,
+          "handlerMs": 3,
+          "signalAbortedAtDone": false,
+          "browserCloseMs": 5317,
+          "browserClosedBeforeDone": false,
+          "threw": null
+        },
+        "facts": {
+          "measured": true,
+          "responseMatchesRequestId": true,
+          "status": 200,
+          "sessionIdReadable": true,
+          "upstreamSawBearer": true,
+          "closedBy": "server",
+          "responseBeforeUpstreamClose": false
+        }
+      },
+      {
+        "id": "C-S5",
+        "combo": "relay-sse",
+        "client": "nr-request",
+        "mode": "sse",
+        "url": "http://mcp.test.local:7788/mcp/sse",
+        "rpcId": 2017,
+        "holdMs": 5000,
+        "cancel": {
+          "type": "at",
+          "ms": 1000
+        },
+        "timeoutMs": null,
+        "browser": {
+          "wallStart": 1795677200304,
+          "headersMs": null,
+          "responseMs": null,
+          "cancelMs": 1006,
+          "readSettledMs": 1006,
+          "endMs": 1006,
+          "relayErrorHeader": null,
+          "postCancelRead": null,
+          "bodyPreview": null,
+          "error": {
+            "name": "AbortError",
+            "message": "network request cancelled",
+            "networkCode": "network_aborted",
+            "timeout": false,
+            "cancelled": true,
+            "ambiguous": false
+          },
+          "harnessError": null
+        },
+        "upstream": {
+          "wallReq": 1795677200306,
+          "eventMs": 310,
+          "closeMs": 1008,
+          "closedBy": "client",
+          "auth": "ok",
+          "status": 200,
+          "sentSessionId": true,
+          "accept": "application/json, text/event-stream",
+          "protocolVersion": "2025-06-18",
+          "exposeSessionId": true
+        },
+        "relayBridge": {
+          "status": 200,
+          "handlerMs": 2,
+          "signalAbortedAtDone": false,
+          "browserCloseMs": 1006,
+          "browserClosedBeforeDone": false,
+          "threw": null
+        },
+        "facts": {
+          "measured": true,
+          "responseMatchesRequestId": false,
+          "sessionIdReadable": null,
+          "upstreamSawBearer": true,
+          "closedBy": "client",
+          "responseBeforeUpstreamClose": false,
+          "cancelToSettledMs": 1,
+          "cancelReachedUpstream": true
+        }
+      },
+      {
+        "id": "C-S3",
+        "combo": "relay-sse",
+        "client": "fetch",
+        "mode": "sse",
+        "url": "http://mcp.test.local:7788/mcp/sse (via POST /fetch envelope)",
+        "rpcId": 2018,
+        "holdMs": 35000,
+        "cancel": null,
+        "timeoutMs": null,
+        "browser": {
+          "wallStart": 1795677201465,
+          "headersMs": 6,
+          "responseMs": 311,
+          "cancelMs": null,
+          "readSettledMs": null,
+          "endMs": 35310,
+          "status": 200,
+          "contentType": "text/event-stream; charset=utf-8",
+          "sessionId": "sess-26-7e6ef08e",
+          "relayErrorHeader": null,
+          "bytes": 139,
+          "postCancelRead": null,
+          "bodyPreview": "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2018,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=sse probe=C-S3\"}],\"isError\":false}}\n\n",
+          "error": null,
+          "harnessError": null
+        },
+        "upstream": {
+          "wallReq": 1795677201469,
+          "eventMs": 309,
+          "closeMs": 35309,
+          "closedBy": "server",
+          "auth": "ok",
+          "status": 200,
+          "sentSessionId": true,
+          "accept": "application/json, text/event-stream",
+          "protocolVersion": "2025-06-18",
+          "exposeSessionId": true
+        },
+        "relayBridge": {
+          "status": 200,
+          "handlerMs": 4,
+          "signalAbortedAtDone": false,
+          "browserCloseMs": 35308,
+          "browserClosedBeforeDone": false,
+          "threw": null
+        },
+        "facts": {
+          "measured": true,
+          "responseMatchesRequestId": true,
+          "status": 200,
+          "sessionIdReadable": true,
+          "upstreamSawBearer": true,
+          "closedBy": "server",
+          "responseBeforeUpstreamClose": true
+        }
+      },
+      {
+        "id": "C-S6",
+        "combo": "relay-sse",
+        "client": "nr-request",
+        "mode": "sse",
+        "url": "http://mcp.test.local:7788/mcp/sse",
+        "rpcId": 2019,
+        "holdMs": 35000,
+        "cancel": null,
+        "timeoutMs": null,
+        "browser": {
+          "wallStart": 1795677201466,
+          "headersMs": null,
+          "responseMs": 35310,
+          "cancelMs": null,
+          "readSettledMs": null,
+          "endMs": 35310,
+          "status": 200,
+          "contentType": "text/event-stream; charset=utf-8",
+          "sessionId": "sess-27-08a347c2",
+          "relayErrorHeader": null,
+          "backend": "edge-relay",
+          "bytes": 139,
+          "postCancelRead": null,
+          "bodyPreview": "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2019,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"pong mode=sse probe=C-S6\"}],\"isError\":false}}\n\n",
+          "error": null,
+          "harnessError": null
+        },
+        "upstream": {
+          "wallReq": 1795677201470,
+          "eventMs": 309,
+          "closeMs": 35308,
+          "closedBy": "server",
+          "auth": "ok",
+          "status": 200,
+          "sentSessionId": true,
+          "accept": "application/json, text/event-stream",
+          "protocolVersion": "2025-06-18",
+          "exposeSessionId": true
+        },
+        "relayBridge": {
+          "status": 200,
+          "handlerMs": 3,
+          "signalAbortedAtDone": false,
+          "browserCloseMs": 35306,
+          "browserClosedBeforeDone": false,
+          "threw": null
+        },
+        "facts": {
+          "measured": true,
+          "responseMatchesRequestId": true,
+          "status": 200,
+          "sessionIdReadable": true,
+          "upstreamSawBearer": true,
+          "closedBy": "server",
+          "responseBeforeUpstreamClose": false
+        }
+      }
+    ],
+    "verdicts": {
+      "relay-json": {
+        "platform": {
+          "verdict": "supported",
+          "criteria": [
+            {
+              "id": "relay-json: J1: the JSON-RPC response for the request id reached the client",
+              "ok": true
+            },
+            {
+              "id": "relay-json: J1: the upstream received the bearer",
+              "ok": true
+            },
+            {
+              "id": "relay-json: J1: MCP-Session-Id is readable by the client",
+              "ok": true
+            }
+          ]
+        },
+        "runtime": {
+          "verdict": "supported",
+          "criteria": [
+            {
+              "id": "relay-json: J2: the JSON-RPC response for the request id reached the client",
+              "ok": true
+            },
+            {
+              "id": "relay-json: J2: the upstream received the bearer",
+              "ok": true
+            },
+            {
+              "id": "relay-json: J2: MCP-Session-Id is readable by the client",
+              "ok": true
+            }
+          ]
+        }
+      },
+      "relay-sse": {
+        "platform": {
+          "verdict": "supported",
+          "criteria": [
+            {
+              "id": "relay-sse: S1: the JSON-RPC response for the request id reached the client",
+              "ok": true
+            },
+            {
+              "id": "relay-sse: S1: the response arrives BEFORE the upstream closes (streaming)",
+              "ok": true
+            },
+            {
+              "id": "relay-sse: S1: MCP-Session-Id is readable by the client",
+              "ok": true
+            },
+            {
+              "id": "relay-sse: S2: the outstanding read settles after cancel",
+              "ok": true
+            },
+            {
+              "id": "relay-sse: S2: the cancel closes the upstream connection",
+              "ok": true
+            },
+            {
+              "id": "relay-sse: S3: the JSON-RPC response for the request id reached the client",
+              "ok": true
+            }
+          ]
+        },
+        "runtime": {
+          "verdict": "not_supported",
+          "failed": [
+            "relay-sse: S4: the response arrives BEFORE the upstream closes (streaming)"
+          ],
+          "notMeasured": [],
+          "criteria": [
+            {
+              "id": "relay-sse: S4: the JSON-RPC response for the request id reached the client",
+              "ok": true
+            },
+            {
+              "id": "relay-sse: S4: the response arrives BEFORE the upstream closes (streaming)",
+              "ok": false
+            },
+            {
+              "id": "relay-sse: S5: the outstanding read settles after cancel",
+              "ok": true
+            },
+            {
+              "id": "relay-sse: S5: the cancel closes the upstream connection",
+              "ok": true
+            },
+            {
+              "id": "relay-sse: S6: the JSON-RPC response for the request id reached the client",
+              "ok": true
+            }
+          ]
+        }
+      }
+    }
+  },
+  "notVerified": [
+    "The deployed Cloudflare edge. functions/fetch.js ran as its real handlers dispatched in Node (undici Request/Response — the technique tests/e2e-network.cjs uses). The workerd/Pages runtime (edge buffering, client-disconnect propagation, header handling at the edge) was not exercised.",
+    "HTTPS / TLS and HTTP/2 / HTTP/3: the stand-in is plain HTTP/1.1 on loopback.",
+    "Real MCP servers: the stand-in answers each POST with exactly one response for the request id. Servers that send notifications or server-initiated requests before the response, batches, or several events per stream were not exercised.",
+    "The standalone server-to-client stream (GET <endpoint> with text/event-stream) and session termination (DELETE <endpoint>).",
+    "A bearer resolved through the C3 credentials port ($NAME in the Authorization header, redirect:\"manual\", echo redaction): the probes send a literal TEST bearer header.",
+    "Protocol-version negotiation failures (400/404 on MCP-Protocol-Version), 429/retry, resumability via Last-Event-ID, OAuth.",
+    "Browsers other than the Chrome recorded in environment.chrome."
+  ],
+  "harnessFailures": [],
+  "durationMs": 122867
+}
