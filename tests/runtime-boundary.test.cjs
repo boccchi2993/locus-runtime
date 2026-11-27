@@ -49,6 +49,7 @@ const HOST_FILES = [
   'src/vfs.js',
   'src/network.js',
   'src/shell.js',
+  'src/mcp.js',
 ];
 // The public ENTRY files: everything a consumer can import directly.
 // The entry rules (no window/DOM work, closure inside the runtime set)
@@ -257,6 +258,7 @@ function finish() {
       'src/vfs.js',
       'src/network.js',
       'src/shell.js',
+      'src/mcp.js',
     ];
     const MISSING = CORE_CLOSURE.filter((f) => !seen.has(f));
     check('G7b the closure covers the whole core', MISSING.length === 0, JSON.stringify(MISSING));

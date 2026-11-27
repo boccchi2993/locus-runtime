@@ -17,6 +17,8 @@ const SUITES = [
   'network.test.cjs',
   'network-runtime.test.cjs',
   'network-credentials.test.cjs',
+  'mcp-client.test.cjs',
+  'shell-mcp.test.cjs',
   'runtime-visibility.test.cjs',
   'mutation-policy.test.cjs',
   'grep-worker.test.cjs',

@@ -47,6 +47,15 @@ import {
   PYTHON_TIMEOUT_MS,
 } from './shell.js';
 import { VirtualWorkspace, MemoryWorkspace } from './vfs.js';
+// C3 second phase: the MCP client contract surface (constants re-exported
+// below; the command implementation itself is reached through shell.js,
+// the task-end cleanup entry through disposeMcpTaskClient).
+import {
+  MCP_PROTOCOL_VERSIONS,
+  MCP_CLIENT_INFO,
+  MCP_LIMITS,
+  disposeMcpTaskClient,
+} from './mcp.js';
 
 // ---------- worker asset validation ----------
 function requireWorkerSource(value, name) {
@@ -129,6 +138,20 @@ export {
   normalizeDistName,
 } from './shell.js';
 
+// ---------- MCP client contract surface (C3 §10.1) ----------
+// The protocol revisions this client speaks, its wire identity and its
+// engineering limits — declared, importable constants a host (product)
+// gates against, the same pattern as the python ABI export above.
+// disposeMcpTaskClient is the public task-end cleanup entry: product's
+// onTaskEnd calls it with the SAME port object it passed as context.mcp
+// to dispose the task's real runtime clients (DELETE per issued session).
+export {
+  MCP_PROTOCOL_VERSIONS,
+  MCP_CLIENT_INFO,
+  MCP_LIMITS,
+  disposeMcpTaskClient,
+};
+
 // ---------- RuntimeHost ----------
 function createRuntimeHost(workerAssets) {
   const sessions = new Set();
@@ -152,6 +175,11 @@ function createRuntimeHost(workerAssets) {
         // this runtime's declared surface — capability packages import-
         // check against it (docs D13).
         pythonAbiExport: true,
+        // mcpClient (C3 §10.1): this runtime speaks the MCP Streamable
+        // HTTP client contract — a host declares its own integration
+        // when this is present and skips it when not (product's
+        // PRODUCT_CORE_REQUIREMENTS downgrade rule).
+        mcpClient: true,
         commands: Object.freeze(Object.keys(SHELL_COMMANDS).sort()),
         limits: IMPL_LIMITS,
       });
@@ -463,6 +491,10 @@ function createRuntimeSession(workerAssets, onReleased) {
             // authorization port — the session binding supplies it, the
             // runtime never constructs or stores credentials.
             credentials: ctx.credentials,
+            // C3 MCP port (§10.1): pass-through like the other ports —
+            // the task environment supplies it; absent in old-generation
+            // hosts, where every `mcp` invocation reports unavailable.
+            mcp: ctx.mcp,
             // Runtime-internal injections: the session's OWN interpreter and
             // grep worker asset — a request can never execute on a foreign
             // instance or fetch its worker source from anywhere else.

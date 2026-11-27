@@ -1212,11 +1212,181 @@ function bytesToBase64(bytes) {
   return btoa(out);
 }
 
+// ------------------------------------------------------------
+//  Incremental direct response (MCP transport, C3 §6.4).
+//
+//  request()/curl keep their buffered read-to-EOF semantics unchanged.
+//  This is the one additional entry point the MCP client needs: a
+//  browser-direct fetch whose body can be consumed chunk by chunk, so
+//  a `text/event-stream` response is readable BEFORE the upstream
+//  closes (the transport measurement, tools/mcp-transport-verify,
+//  shows request() delivers the same body only at EOF: D-S3/C-S4).
+//
+//  Reuses the exact machinery of _direct(): URL/header validation,
+//  redirect:'manual' + credentials:'omit', a client deadline armed
+//  over headers AND body, the external task signal merged into the
+//  fetch controller, and the same error taxonomy. Differences, all
+//  MCP-driven:
+//    - the body is NOT read here; the caller consumes `read()` chunks;
+//    - the deadline can be suspended/resumed around a host-side wait
+//      that must not consume it (C3 §8.4: a form the user is filling
+//      in) — the remaining budget is preserved, not restarted;
+//    - `close()` tears the stream down without waiting for it.
+//  Backend selection is deliberate: this is the direct backend only.
+//  The MCP client fixes its transport per session (C3 §6.1 I3) and
+//  never re-routes after send (I1) — there is no fallback and no
+//  retry here, the same zero-automatic-retry rule as request().
+// ------------------------------------------------------------
+async function openDirectIncremental(spec) {
+  const opts = spec && typeof spec === 'object' ? spec : {};
+  const method = normalizeMethod(opts.method || 'GET');
+  const parsed = parseHttpUrl(opts.url);
+  const headers = filterRequestHeaders(opts.headers);
+  const targetUrl = parsed.origin + parsed.pathname + parsed.search;
+  const externalSignal = opts.signal || null;
+  const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+    ? opts.timeoutMs : DIRECT_TIMEOUT_MS;
+
+  if (externalSignal && externalSignal.aborted) throw makeNetCancelledError();
+  const body = opts.body == null ? null : toRequestBody(opts.body);
+
+  const controller = new AbortController();
+  let timedOut = false;
+  let deadlineEnd = Date.now() + timeoutMs;
+  let timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  let suspendedMs = null;
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+
+  // Classify a deadline/cancel failure exactly like _direct's catch.
+  const classify = (e) => {
+    if (externalSignal && externalSignal.aborted) return makeNetCancelledError();
+    if (timedOut) return makeNetTimeoutError(timeoutMs);
+    return e;
+  };
+
+  let reader = null;
+  const takeReader = () => {
+    if (reader) return reader;
+    if (resBody && typeof resBody.getReader === 'function') {
+      reader = resBody.getReader();
+    }
+    return reader;
+  };
+  let resBody = null;
+
+  try {
+    let res;
+    try {
+      res = await fetch(targetUrl, {
+        method: method,
+        // MCP never follows redirects (C3 §5.6.4): every request is
+        // credentialed and side-effecting. An opaqueredirect/3xx is
+        // refused below instead of being replayed elsewhere.
+        redirect: 'manual',
+        credentials: 'omit', // never ambient cookies; the bearer is explicit
+        headers: Object.keys(headers).length ? headers : undefined,
+        body: method === 'GET' || method === 'HEAD' ? undefined : (body || undefined),
+        signal: controller.signal,
+      });
+    } catch (e) {
+      // Pre-dispatch transport failure marker: the MCP client may retry a
+      // READ-ONLY request exactly once on this class of failure (C3 §6.8);
+      // everything after a Response exists is never retry-eligible.
+      if (externalSignal && externalSignal.aborted) throw makeNetCancelledError();
+      if (timedOut) throw makeNetTimeoutError(timeoutMs);
+      if (e instanceof TypeError) throw new DirectTransportFailure(e);
+      throw e;
+    }
+
+    if (res.type === 'opaqueredirect' || isRedirectStatus(res.status)) {
+      discardBodyQuietly(res);
+      throw makeNetError('network_redirect_refused',
+        'the server answered with a redirect; redirects are not followed');
+    }
+
+    const headersAndList = headersFromResponse(res.headers);
+    const finalUrl = res.url || targetUrl;
+    assertFinalScheme(finalUrl);
+    resBody = res.body || null;
+
+    const readChunk = async () => {
+      const r = takeReader();
+      if (!r) return { done: true, value: undefined };
+      try {
+        return await raceAbort(r.read(), controller.signal);
+      } catch (e) {
+        if (e && (e.cancelled || e.name === 'AbortError')) {
+          cancelReaderQuietly(r);
+          throw classify(e);
+        }
+        throw e; // genuine mid-body network failure or stream error
+      }
+    };
+
+    return {
+      status: res.status,
+      statusText: res.statusText || '',
+      headers: headersAndList.object,
+      headerList: headersAndList.list,
+      finalUrl: finalUrl,
+      backend: 'browser-direct',
+      // One body chunk ({ done, value }) raced against the deadline and
+      // the task signal. The caller owns the size accounting.
+      read: readChunk,
+      // The underlying reader's settled-closed promise, without
+      // consuming anything: resolves when the stream is closed, rejects
+      // when it errors. The MCP client races a pending form wait against
+      // it so a stream that dies while the user is filling the form
+      // still ends the wait (C3 §8.5). Never left unobserved by the
+      // caller — attach a no-op catch when not racing it.
+      get readerClosed() {
+        const r = takeReader();
+        return r ? r.closed : Promise.resolve();
+      },
+      // C3 §8.4: a host-side form wait must not consume the request
+      // deadline. Suspend keeps the REMAINING budget; resume re-arms it.
+      suspendDeadline() {
+        if (suspendedMs !== null) return;
+        clearTimeout(timer);
+        suspendedMs = Math.max(0, deadlineEnd - Date.now());
+      },
+      resumeDeadline() {
+        if (suspendedMs === null) return;
+        const remaining = suspendedMs;
+        suspendedMs = null;
+        if (remaining <= 0) { timedOut = true; controller.abort(); return; }
+        deadlineEnd = Date.now() + remaining;
+        timer = setTimeout(() => { timedOut = true; controller.abort(); }, remaining);
+      },
+      // Tear the response down without waiting for it (a stalled stream
+      // need not react to cancellation — cancelReaderQuietly's contract).
+      close() {
+        if (suspendedMs !== null) { suspendedMs = null; }
+        clearTimeout(timer);
+        timer = null;
+        if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
+        const r = takeReader();
+        if (r) cancelReaderQuietly(r);
+      },
+    };
+  } catch (e) {
+    clearTimeout(timer);
+    timer = null;
+    if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
+    if (reader) cancelReaderQuietly(reader);
+    throw e;
+  }
+}
+
 // ============================================================
 //  M3a (repository extraction): ES module exports. The M2a classic
 //  globalThis publishes are gone — shell.js imports NetworkRuntime /
 //  safeNetworkUrlForDisplay directly; the wider taxonomy helpers stay
 //  module-internal (consumers use the documented error codes).
+//  The MCP client (src/mcp.js, C3 §10.1) reuses the deadline/abort/
+//  header/error machinery instead of a second copy, plus the
+//  incremental direct response for SSE.
 // ============================================================
 export {
   NetworkRuntime,
@@ -1225,4 +1395,22 @@ export {
   NETWORK_MAX_REQUEST_BYTES,
   NETWORK_MAX_RESPONSE_BYTES,
   RELAY_CLIENT_TIMEOUT_MS,
+  // reused by src/mcp.js (C3 §10.1): deadline + cancellation + header
+  // validation + the error taxonomy, single implementation
+  fetchWithDeadline,
+  raceAbort,
+  cancelReaderQuietly,
+  filterRequestHeaders,
+  parseHttpUrl,
+  headersFromResponse,
+  isRedirectStatus,
+  discardBodyQuietly,
+  makeNetError,
+  makeNetTimeoutError,
+  makeNetCancelledError,
+  makeNetTooLargeError,
+  redactCredentialFromResult,
+  DirectTransportFailure,
+  // MCP transport: incremental browser-direct response (C3 §6.4)
+  openDirectIncremental,
 };
