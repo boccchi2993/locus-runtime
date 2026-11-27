@@ -143,6 +143,12 @@ function onHappyHandshake(opts) {
     if (o.callBehavior) return o.callBehavior(c);
     return jsonRpc({ content: [{ type: 'text', text: 'ok' }], isError: false }, null, c.body.id);
   });
+  // Replies to server requests (form answers, pings) — a JSON-RPC
+  // response POST: has an id and a result/error, no method. Accepted by
+  // default; replyBehavior overrides (E12/E13).
+  on((c) => c.body && c.body.method === undefined && c.body.id !== undefined
+    && (c.body.result !== undefined || c.body.error !== undefined),
+  (c) => (o.replyBehavior ? o.replyBehavior(c) : new Response(null, { status: 202 })));
 }
 
 let passed = 0, failed = 0;
@@ -191,9 +197,12 @@ async function run() {
       && !init.headers['mcp-protocol-version'] && !init.headers['mcp-session-id'],
       JSON.stringify(init.headers));
     const inited = calls[1];
-    check('I2 initialized notification is bare (appendix B): no version/session headers',
+    check('I2 initialized notification carries the negotiated version + issued session id'
+      + ' (owner correction of the appendix B wire example)',
       inited.body.method === 'notifications/initialized' && inited.body.id === undefined
-      && !inited.headers['mcp-protocol-version'] && !inited.headers['mcp-session-id'],
+      && inited.headers['mcp-protocol-version'] === '2025-06-18'
+      && inited.headers['mcp-session-id'] === 'sess-1'
+      && inited.headers['authorization'] === 'Bearer ' + TOKEN,
       JSON.stringify(inited.headers));
     const list = calls[2];
     check('I3 tools/list carries negotiated version + session id, id increments',
@@ -213,15 +222,18 @@ async function run() {
     await client.dispose();
   }
 
-  // session id only after the server issued one
+  // session id only after the server issued one — the version header IS
+  // on the notification, the session id is not (nothing was issued)
   {
     resetServer();
     onHappyHandshake({ noSessionId: true });
     const client = clientFor(fakePort([serverRecord()]));
     await client.listTools('acme');
-    check('I5 no session id header when the server issued none',
-      calls[2].headers['mcp-session-id'] === undefined,
-      JSON.stringify(calls[2].headers));
+    check('I5 no session id header anywhere when the server issued none',
+      calls[1].headers['mcp-session-id'] === undefined
+      && calls[1].headers['mcp-protocol-version'] === '2025-06-18'
+      && calls[2].headers['mcp-session-id'] === undefined,
+      JSON.stringify(calls[1].headers));
     await client.dispose();
   }
 
@@ -1019,6 +1031,82 @@ async function run() {
       JSON.stringify(call.result));
     await client.dispose();
   }
+  {
+    // credential check fails when the form answer is due: the form
+    // content is NOT sent (§5.6.3), the sent tools/call is reported as
+    // an unknown outcome and never re-sent (§6.8/§8.1.6), and the server
+    // drops to needs-connection (§5.3). The binding goes stale between
+    // the dispatch of tools/call (still fine) and the reply (blocked) —
+    // exactly the window the fix must cover.
+    resetServer();
+    let bindingStale = false;
+    const es = elicitScript(async () => {
+      bindingStale = true; // the user answered; the world moved on
+      return { action: 'accept', content: { workspace: 'alpha' } };
+    });
+    onHappyHandshake({ callBehavior: () => sseResponse([sseWithForms([{ params: FORM }], 'never')]) });
+    const creds = {
+      bindings: async () => [{
+        name: 'ACME_TOKEN', origin: 'https://mcp.acme.test', pathPrefix: '/',
+        header: 'Authorization', scheme: 'Bearer',
+        state: bindingStale ? 'needs-reconfirm' : 'connected',
+      }],
+      value: async (name) => (name === 'ACME_TOKEN' ? TOKEN : null),
+    };
+    const port = fakePort([serverRecord()], es);
+    const client = clientFor(port, creds);
+    const e = await errOf(client.callTool('acme', 'search', { query: 'x' }));
+    const reply = calls.find((c) => c.body && c.body.id === 9001);
+    check('E11 credential check fails → the form reply is NOT sent at all',
+      !reply, JSON.stringify(reply && reply.body));
+    check('E11 the outcome is unknown and tools/call was sent exactly once',
+      e && /outcome unknown/.test(e.message)
+      && /credential check failed/.test(e.message)
+      && countBody('tools/call') === 1, e && e.message);
+    check('E11 no reply POST with form content ever left the client',
+      calls.every((c) => !(c.body && c.body.id === 9001)), 'reply POST present');
+    check('E11 the server was dropped to needs-connection',
+      port.states.acme && port.states.acme.state === 'needs-connection',
+      JSON.stringify(port.states));
+    await client.dispose();
+  }
+  {
+    // the reply POST is rejected by the server (500): shortPost contains
+    // it, the call reports outcome unknown and the original tools/call is
+    // NOT re-sent (server-side count — §8.1.6/§6.8).
+    resetServer();
+    const es = elicitScript(async () => ({ action: 'accept', content: { workspace: 'alpha' } }));
+    onHappyHandshake({
+      callBehavior: () => sseResponse([sseWithForms([{ params: FORM }], 'never')]),
+      replyBehavior: () => statusResponse(500),
+    });
+    const client = clientFor(fakePort([serverRecord()], es));
+    const e = await errOf(client.callTool('acme', 'search', { query: 'x' }));
+    check('E12 rejected form reply → outcome unknown',
+      e && /outcome unknown/.test(e.message)
+      && /form reply was not delivered/.test(e.message), e && e.message);
+    check('E12 the original tools/call was sent exactly once (no auto re-send)',
+      countBody('tools/call') === 1);
+    check('E12 exactly one reply attempt (no reply retry either)',
+      calls.filter((c) => c.body && c.body.id === 9001).length === 1);
+    await client.dispose();
+  }
+  {
+    // the reply transport fails outright (fetch throws): same rule —
+    // outcome unknown, one tools/call, no re-send.
+    resetServer();
+    const es = elicitScript(async () => ({ action: 'accept', content: {} }));
+    onHappyHandshake({
+      callBehavior: () => sseResponse([sseWithForms([{ params: FORM }], 'never')]),
+      replyBehavior: () => { throw new TypeError('network down'); },
+    });
+    const client = clientFor(fakePort([serverRecord()], es));
+    const e = await errOf(client.callTool('acme', 'search', { query: 'x' }));
+    check('E13 transport-failed form reply → outcome unknown, one tools/call',
+      e && /outcome unknown/.test(e.message) && countBody('tools/call') === 1,
+      e && e.message);
+    await client.dispose();
+  }
 
   // ============ 14. dispose (§6.7 / §11 D) ============
   {
@@ -1054,6 +1142,44 @@ async function run() {
     await client.listTools('acme');
     await client.dispose();
     check('D3 DELETE answered 405 → ignored, dispose settles', countCalls('DELETE') === 1);
+  }
+
+  // ============ 14b. the public cleanup entry (§6.7 / §11 D) ============
+  // The host (product) never sees createMcpTaskClient: runMcp caches the
+  // client on the port via taskClientFor, and onTaskEnd calls the public
+  // entry with the SAME port object it passed as context.mcp. The proof
+  // here runs a real shell command (runMcp `tools`) that created a
+  // session, then cleans up through the public entry: exactly one DELETE
+  // for the issued session, repeated calls and unknown ports are no-ops.
+  {
+    resetServer();
+    onHappyHandshake();
+    on((c) => c.method === 'DELETE', () => new Response(null, { status: 204 }));
+    const port = fakePort([serverRecord()]);
+    const res = await M.runMcp(['tools', 'acme'], {},
+      { mcp: port, credentials: fakeCredentials() });
+    check('D4 the shell command created the session (tools listed)',
+      res.success === true && /search/.test(res.stdout), res.stderr);
+    const before = calls.length;
+    await M.disposeMcpTaskClient(port);
+    const del = calls.slice(before).find((c) => c.method === 'DELETE');
+    check('D4 the public entry sends exactly one DELETE with session id, version, bearer',
+      calls.filter((c) => c.method === 'DELETE').length === 1
+      && !!del && del.url === URL_
+      && del.headers['mcp-session-id'] === 'sess-1'
+      && del.headers['mcp-protocol-version'] === '2025-06-18'
+      && del.headers['authorization'] === 'Bearer ' + TOKEN,
+      JSON.stringify(del && del.headers));
+    await M.disposeMcpTaskClient(port);
+    check('D4 a second call on the same port is a no-op (still one DELETE)',
+      countCalls('DELETE') === 1);
+    await M.disposeMcpTaskClient(fakePort([serverRecord()]));
+    await M.disposeMcpTaskClient(null);
+    check('D5 unknown/absent ports are safe no-ops', countCalls('DELETE') === 1);
+    const again = await M.runMcp(['servers'], {}, { mcp: port, credentials: fakeCredentials() });
+    check('D5 after cleanup a new command starts fresh (client re-created, servers read-only)',
+      again.success === true && countBody('initialize') === 1,
+      again.stderr);
   }
 
   // ============ 15. state checks (§4.3) ============
