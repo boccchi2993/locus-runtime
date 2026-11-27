@@ -640,6 +640,24 @@ export function createMcpTaskClient(port, deps) {
     } catch (e) { /* the port validates; a refusal never breaks the client */ }
   }
 
+  // Transient-failure notification (C3 §5.5): a loss the client classifies
+  // as transient reports a stable lowercase token to the port WITHOUT any
+  // harness state write — the UI's "Unreachable — will retry on next use"
+  // comes from this in-memory note, never from a state flip (the binding
+  // and the connection record stay untouched). The first successful
+  // request for the server clears it. Both calls are optional on the port
+  // and fully contained: a refusing port never breaks the client.
+  function noteFailureQuiet(serverId, token) {
+    try {
+      if (typeof port.noteFailure === 'function') port.noteFailure(serverId, token);
+    } catch (e) { /* the port validates; a refusal never breaks the client */ }
+  }
+  function noteSuccessQuiet(serverId) {
+    try {
+      if (typeof port.noteSuccess === 'function') port.noteSuccess(serverId);
+    } catch (e) { /* contained, like every port observer */ }
+  }
+
   // ---- record + state checks (C3 §4.3; no network) ----
   async function serverRecord(serverId) {
     const list = await port.servers();
@@ -838,19 +856,24 @@ export function createMcpTaskClient(port, deps) {
             + ' answered with a redirect; redirects are not followed');
         }
         if (e && e.networkCode === 'network_timeout') {
+          noteFailureQuiet(sessionRef.serverId, 'timeout');
           throw errOf('unreachable', unreachableMsg(sessionRef.serverId, 'timeout'),
             'timeout');
         }
         if (e instanceof DirectTransportFailure) {
+          noteFailureQuiet(sessionRef.serverId, 'network');
           throw errOf('unreachable', unreachableMsg(sessionRef.serverId, 'network'),
             'network');
         }
+        noteFailureQuiet(sessionRef.serverId, 'network');
         throw errOf('unreachable', unreachableMsg(sessionRef.serverId, 'network'),
           'network');
       }
 
       try {
-        return await consumeResponse(handle, bearer, { initialize: initialize });
+        const finalResponse = await consumeResponse(handle, bearer, { initialize: initialize });
+        noteSuccessQuiet(sessionRef.serverId); // a completed request clears the transient note
+        return finalResponse;
       } finally {
         handle.close();
       }
@@ -881,6 +904,7 @@ export function createMcpTaskClient(port, deps) {
       if (status === 429 || status >= 500) {
         // Definitive transient: the server answered without processing
         // (C3 §6.8 "暂时性故障，请求确定没被处理").
+        noteFailureQuiet(session.serverId, 'http-' + status);
         throw errOf('unreachable', unreachableMsg(session.serverId, 'http-' + status));
       }
       if (status === 202) {
@@ -951,8 +975,10 @@ export function createMcpTaskClient(port, deps) {
         } catch (e) {
           if (isCancelledShape(e)) throw e;
           if (e && e.networkCode === 'network_timeout') {
+            noteFailureQuiet(serverId, 'timeout');
             throw errOf('unreachable', unreachableMsg(serverId, 'timeout'), 'timeout');
           }
+          noteFailureQuiet(serverId, 'network');
           throw errOf('unreachable', unreachableMsg(serverId, 'network'), 'network');
         }
         if (chunk.done) break;
@@ -1109,9 +1135,11 @@ export function createMcpTaskClient(port, deps) {
           } catch (e) {
             if (isCancelledShape(e)) throw e;
             if (e && e.networkCode === 'network_timeout') {
+              noteFailureQuiet(session.serverId, 'timeout');
               throw errOf('unreachable', unreachableMsg(session.serverId, 'timeout'),
                 'timeout');
             }
+            noteFailureQuiet(session.serverId, 'stream-closed-early');
             throw errOf('stream-early-end',
               unreachableMsg(session.serverId, 'stream closed early'),
               'stream closed early');
@@ -1147,6 +1175,7 @@ export function createMcpTaskClient(port, deps) {
       formAlive.abort();
       if (signal) signal.removeEventListener('abort', onTaskAbort);
       // The stream ended without a final response (C3 §6.4).
+      noteFailureQuiet(session.serverId, 'stream-closed-early');
       throw errOf('stream-early-end',
         unreachableMsg(session.serverId, 'stream closed early'),
         'stream closed early');
@@ -1204,9 +1233,11 @@ export function createMcpTaskClient(port, deps) {
     });
     if (!accepted) {
       resetSession(session);
+      noteFailureQuiet(session.serverId, 'handshake');
       throw errOf('unreachable', unreachableMsg(session.serverId, 'initialization'
         + ' was not accepted; the next call re-handshakes'));
     }
+    noteSuccessQuiet(session.serverId);
     return session;
   }
 

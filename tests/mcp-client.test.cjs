@@ -96,10 +96,14 @@ function serverRecord(extra) {
 function fakePort(servers, opts) {
   const o = opts || {};
   const states = {};
+  const notes = []; // { serverId, token } from noteFailure; { serverId } clears from noteSuccess
   return {
     servers: async () => servers,
     setState: (id, state, reason) => { states[id] = { state: state, reason: reason }; },
     states: states,
+    noteFailure: (id, token) => { notes.push({ serverId: id, token: token }); },
+    noteSuccess: (id) => { notes.push({ serverId: id, token: null }); },
+    notes: notes,
     elicit: o.elicit || (async () => ({ action: 'cancel' })),
     beforeToolCall: o.beforeToolCall,
   };
@@ -1142,6 +1146,48 @@ async function run() {
     await client.listTools('acme');
     await client.dispose();
     check('D3 DELETE answered 405 → ignored, dispose settles', countCalls('DELETE') === 1);
+  }
+
+  // ============ 14c. transient-failure notes (§5.5) ============
+  // A transient loss reports a lowercase token to the port WITHOUT any
+  // harness state write; the next success clears it.
+  {
+    resetServer();
+    let failFirst = true;
+    onHappyHandshake({ toolsListBehavior: (c) => {
+      if (failFirst) { failFirst = false; return statusResponse(503); }
+      return jsonRpc({ tools: [{
+        name: 'search', inputSchema: { type: 'object', properties: {} },
+      }], nextCursor: null }, null, c.body.id);
+    } });
+    const port = fakePort([serverRecord()]);
+    const client = clientFor(port);
+    const e1 = await errOf(client.listTools('acme'));
+    check('R1 a 503 is transient: reported to the model, NO auto resend',
+      e1 && /unreachable/.test(e1.message) && countBody('tools/list') === 1,
+      e1 && e1.message);
+    check('R1 the failure was reported as token http-503 with NO harness state write',
+      port.notes.some((n) => n.serverId === 'acme' && n.token === 'http-503')
+      && port.states.acme === undefined, JSON.stringify(port.notes));
+    const tools = await client.listTools('acme'); // the NEXT command retries
+    check('R1 the next command succeeds and clears the note (a null-token note followed)',
+      tools.length === 1 && port.notes.some((n) => n.serverId === 'acme' && n.token === null),
+      JSON.stringify(port.notes));
+    await client.dispose();
+  }
+  {
+    // a stream that ends without a final response on tools/call: token
+    // stream-closed-early, still no state write.
+    resetServer();
+    onHappyHandshake({ callBehavior: () => sseResponse(['data: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n']) });
+    const port = fakePort([serverRecord()]);
+    const client = clientFor(port);
+    const e = await errOf(client.callTool('acme', 'search', { query: 'x' }));
+    check('R2 stream ended early → outcome unknown + token stream-closed-early, no state write',
+      e && /outcome unknown/.test(e.message)
+      && port.notes.some((n) => n.token === 'stream-closed-early')
+      && port.states.acme === undefined, e && e.message);
+    await client.dispose();
   }
 
   // ============ 14b. the public cleanup entry (§6.7 / §11 D) ============
