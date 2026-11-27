@@ -48,11 +48,13 @@ import {
 } from './shell.js';
 import { VirtualWorkspace, MemoryWorkspace } from './vfs.js';
 // C3 second phase: the MCP client contract surface (constants re-exported
-// below; the command implementation itself is reached through shell.js).
+// below; the command implementation itself is reached through shell.js,
+// the task-end cleanup entry through disposeMcpTaskClient).
 import {
   MCP_PROTOCOL_VERSIONS,
   MCP_CLIENT_INFO,
   MCP_LIMITS,
+  disposeMcpTaskClient,
 } from './mcp.js';
 
 // ---------- worker asset validation ----------
@@ -140,10 +142,14 @@ export {
 // The protocol revisions this client speaks, its wire identity and its
 // engineering limits — declared, importable constants a host (product)
 // gates against, the same pattern as the python ABI export above.
+// disposeMcpTaskClient is the public task-end cleanup entry: product's
+// onTaskEnd calls it with the SAME port object it passed as context.mcp
+// to dispose the task's real runtime clients (DELETE per issued session).
 export {
   MCP_PROTOCOL_VERSIONS,
   MCP_CLIENT_INFO,
   MCP_LIMITS,
+  disposeMcpTaskClient,
 };
 
 // ---------- RuntimeHost ----------

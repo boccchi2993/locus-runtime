@@ -640,6 +640,24 @@ export function createMcpTaskClient(port, deps) {
     } catch (e) { /* the port validates; a refusal never breaks the client */ }
   }
 
+  // Transient-failure notification (C3 §5.5): a loss the client classifies
+  // as transient reports a stable lowercase token to the port WITHOUT any
+  // harness state write — the UI's "Unreachable — will retry on next use"
+  // comes from this in-memory note, never from a state flip (the binding
+  // and the connection record stay untouched). The first successful
+  // request for the server clears it. Both calls are optional on the port
+  // and fully contained: a refusing port never breaks the client.
+  function noteFailureQuiet(serverId, token) {
+    try {
+      if (typeof port.noteFailure === 'function') port.noteFailure(serverId, token);
+    } catch (e) { /* the port validates; a refusal never breaks the client */ }
+  }
+  function noteSuccessQuiet(serverId) {
+    try {
+      if (typeof port.noteSuccess === 'function') port.noteSuccess(serverId);
+    } catch (e) { /* contained, like every port observer */ }
+  }
+
   // ---- record + state checks (C3 §4.3; no network) ----
   async function serverRecord(serverId) {
     const list = await port.servers();
@@ -726,8 +744,11 @@ export function createMcpTaskClient(port, deps) {
   function sessionHeaders(session, bearer) {
     // Post-handshake headers (C3 §6.2): the negotiated protocol version
     // and — only when the server issued one — the session id. The
-    // initialize request and the bare notifications/initialized POST
-    // carry neither (wire example, C3 appendix B).
+    // initialize request itself carries neither; every other request of
+    // the session does, INCLUDING notifications/initialized and the
+    // replies to server requests (owner's correction of the C3 appendix
+    // B wire example: the session already exists at that point, so the
+    // version and session headers apply from the notification on).
     const headers = baseHeaders(session, bearer);
     if (session.protocolVersion) headers['mcp-protocol-version'] = session.protocolVersion;
     if (session.sessionId) headers['mcp-session-id'] = session.sessionId;
@@ -835,19 +856,24 @@ export function createMcpTaskClient(port, deps) {
             + ' answered with a redirect; redirects are not followed');
         }
         if (e && e.networkCode === 'network_timeout') {
+          noteFailureQuiet(sessionRef.serverId, 'timeout');
           throw errOf('unreachable', unreachableMsg(sessionRef.serverId, 'timeout'),
             'timeout');
         }
         if (e instanceof DirectTransportFailure) {
+          noteFailureQuiet(sessionRef.serverId, 'network');
           throw errOf('unreachable', unreachableMsg(sessionRef.serverId, 'network'),
             'network');
         }
+        noteFailureQuiet(sessionRef.serverId, 'network');
         throw errOf('unreachable', unreachableMsg(sessionRef.serverId, 'network'),
           'network');
       }
 
       try {
-        return await consumeResponse(handle, bearer, { initialize: initialize });
+        const finalResponse = await consumeResponse(handle, bearer, { initialize: initialize });
+        noteSuccessQuiet(sessionRef.serverId); // a completed request clears the transient note
+        return finalResponse;
       } finally {
         handle.close();
       }
@@ -878,6 +904,7 @@ export function createMcpTaskClient(port, deps) {
       if (status === 429 || status >= 500) {
         // Definitive transient: the server answered without processing
         // (C3 §6.8 "暂时性故障，请求确定没被处理").
+        noteFailureQuiet(session.serverId, 'http-' + status);
         throw errOf('unreachable', unreachableMsg(session.serverId, 'http-' + status));
       }
       if (status === 202) {
@@ -948,8 +975,10 @@ export function createMcpTaskClient(port, deps) {
         } catch (e) {
           if (isCancelledShape(e)) throw e;
           if (e && e.networkCode === 'network_timeout') {
+            noteFailureQuiet(serverId, 'timeout');
             throw errOf('unreachable', unreachableMsg(serverId, 'timeout'), 'timeout');
           }
+          noteFailureQuiet(serverId, 'network');
           throw errOf('unreachable', unreachableMsg(serverId, 'network'), 'network');
         }
         if (chunk.done) break;
@@ -1066,18 +1095,34 @@ export function createMcpTaskClient(port, deps) {
 
       async function deliverReply(req, reply) {
         if (telemetry) telemetry.backend = 'browser-direct';
-        const bearer2 = await safeBearer();
-        const headers = bearer2 === undefined
-          ? baseHeaders(session, null)
-          : sessionHeaders(session, bearer2);
-        await shortPost(session.url, headers, reply);
-      }
-
-      async function safeBearer() {
+        // The reply IS form content: it goes out only when the credential
+        // check passes. A failed check sends NOTHING (C3 §5.6.3 — the
+        // binding check already dropped the server to needs-connection)
+        // — never a bare copy of the form answer.
+        let bearer2;
         try {
-          return await resolveBearer(session);
+          bearer2 = await resolveBearer(session);
         } catch (e) {
-          return undefined; // the reply goes out without a token; best effort
+          // The check failed AFTER the tools/call was dispatched and the
+          // server is waiting for this answer: the call can have no
+          // result — a post-dispatch loss, outcome unknown (C3 §6.8,
+          // §8.1.6), never re-sent.
+          throw errOf('reply-blocked',
+            'mcp: the form reply to ' + session.serverId
+            + ' was not sent — the credential check failed',
+            'the credential check failed before the form reply');
+        }
+        const headers = sessionHeaders(session, bearer2);
+        const res = await shortPost(session.url, headers, reply);
+        if (!res) {
+          // shortPost contained the failure: the reply was not accepted
+          // (non-2xx) or the transport failed. The server is left waiting
+          // for an answer that will not arrive, so this tools/call has no
+          // result (C3 §8.1.6). Outcome unknown — no retry of the reply
+          // and no re-send of the original call (C3 §6.8).
+          throw errOf('reply-undelivered',
+            'mcp: the form reply could not be delivered to ' + session.serverId,
+            'the form reply was not delivered');
         }
       }
 
@@ -1090,9 +1135,11 @@ export function createMcpTaskClient(port, deps) {
           } catch (e) {
             if (isCancelledShape(e)) throw e;
             if (e && e.networkCode === 'network_timeout') {
+              noteFailureQuiet(session.serverId, 'timeout');
               throw errOf('unreachable', unreachableMsg(session.serverId, 'timeout'),
                 'timeout');
             }
+            noteFailureQuiet(session.serverId, 'stream-closed-early');
             throw errOf('stream-early-end',
               unreachableMsg(session.serverId, 'stream closed early'),
               'stream closed early');
@@ -1128,6 +1175,7 @@ export function createMcpTaskClient(port, deps) {
       formAlive.abort();
       if (signal) signal.removeEventListener('abort', onTaskAbort);
       // The stream ended without a final response (C3 §6.4).
+      noteFailureQuiet(session.serverId, 'stream-closed-early');
       throw errOf('stream-early-end',
         unreachableMsg(session.serverId, 'stream closed early'),
         'stream closed early');
@@ -1164,18 +1212,32 @@ export function createMcpTaskClient(port, deps) {
     session.protocolVersion = version;
     const sid = resp.headers ? resp.headers['mcp-session-id'] : null;
     session.sessionId = typeof sid === 'string' && sid ? sid : null;
-    // notifications/initialized — a bare POST per the wire example
-    // (C3 appendix B): no protocol-version header, no session id.
-    const bearer = await resolveBearer(session);
-    const accepted = await shortPost(session.url, baseHeaders(session, bearer), {
+    // notifications/initialized — the session exists from here on, so the
+    // notification carries the negotiated protocol-version header and,
+    // when the server issued one, the session id (owner's correction of
+    // the appendix B wire example; the MCP transport spec requires the
+    // version header on every request after initialize).
+    let bearer;
+    try {
+      bearer = await resolveBearer(session);
+    } catch (e) {
+      // A binding failure here leaves a half-open session (initialize
+      // answered, the notification missing) — reset it so the next
+      // command re-handshakes from scratch instead of reusing it.
+      resetSession(session);
+      throw e;
+    }
+    const accepted = await shortPost(session.url, sessionHeaders(session, bearer), {
       jsonrpc: '2.0',
       method: 'notifications/initialized',
     });
     if (!accepted) {
       resetSession(session);
+      noteFailureQuiet(session.serverId, 'handshake');
       throw errOf('unreachable', unreachableMsg(session.serverId, 'initialization'
         + ' was not accepted; the next call re-handshakes'));
     }
+    noteSuccessQuiet(session.serverId);
     return session;
   }
 
@@ -1635,6 +1697,21 @@ function taskClientFor(port, opts) {
     taskClients.set(port, client);
   }
   return client;
+}
+
+// The public task-end cleanup entry (C3 §6.7): takes the SAME port object
+// the task's commands received as context.mcp, removes the cached client
+// and disposes it — one best-effort DELETE per session the server issued
+// a session id for, every open stream closed, form state dropped. Safe to
+// call repeatedly and when the task never created a client: the second
+// call finds no entry and is a no-op, and client.dispose() itself is
+// idempotent. Returns the dispose promise (never rejects) so a host MAY
+// join it; onTaskEnd is not required to.
+export function disposeMcpTaskClient(port) {
+  const client = port && typeof port === 'object' ? taskClients.get(port) : undefined;
+  if (!client) return Promise.resolve();
+  taskClients.delete(port);
+  return client.dispose();
 }
 
 // ------------------------------------------------------------
